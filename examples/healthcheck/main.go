@@ -10,10 +10,10 @@ import (
 	"os"
 	"time"
 
-	gostox "github.com/T1anjiu/GoStox"
-	"github.com/T1anjiu/GoStox/providers/eastmoney"
-	"github.com/T1anjiu/GoStox/providers/sina"
-	"github.com/T1anjiu/GoStox/providers/tencent"
+	gostox "github.com/T1anjiu/gostox"
+	"github.com/T1anjiu/gostox/providers/eastmoney"
+	"github.com/T1anjiu/gostox/providers/sina"
+	"github.com/T1anjiu/gostox/providers/tencent"
 )
 
 // 用浦发银行（sh600000）和平安银行（sz000001）做测试标的，两只都是流动性极好的股票。

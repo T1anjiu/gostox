@@ -6,8 +6,8 @@ import (
 	"os"
 	"time"
 
-	gostox "github.com/T1anjiu/GoStox"
-	"github.com/T1anjiu/GoStox/providers/eastmoney"
+	gostox "github.com/T1anjiu/gostox"
+	"github.com/T1anjiu/gostox/providers/eastmoney"
 )
 
 func main() {

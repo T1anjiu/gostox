@@ -1,4 +1,4 @@
-module github.com/T1anjiu/GoStox
+module github.com/T1anjiu/gostox
 
 go 1.22
 

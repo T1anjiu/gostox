@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	gostox "github.com/T1anjiu/GoStox"
+	gostox "github.com/T1anjiu/gostox"
 )
 
 func TestParseTencentQuote(t *testing.T) {

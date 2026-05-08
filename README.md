@@ -67,7 +67,7 @@
 ## 安装
 
 ```bash
-go get github.com/T1anjiu/GoStox
+go get github.com/T1anjiu/gostox
 ```
 
 要求：
@@ -87,8 +87,8 @@ import (
 	"log"
 	"time"
 
-	gostox "github.com/T1anjiu/GoStox"
-	"github.com/T1anjiu/GoStox/providers/eastmoney"
+	gostox "github.com/T1anjiu/gostox"
+	"github.com/T1anjiu/gostox/providers/eastmoney"
 )
 
 func main() {
@@ -123,10 +123,10 @@ import (
 	"log"
 	"time"
 
-	gostox "github.com/T1anjiu/GoStox"
-	"github.com/T1anjiu/GoStox/providers/eastmoney"
-	"github.com/T1anjiu/GoStox/providers/sina"
-	"github.com/T1anjiu/GoStox/providers/tencent"
+	gostox "github.com/T1anjiu/gostox"
+	"github.com/T1anjiu/gostox/providers/eastmoney"
+	"github.com/T1anjiu/gostox/providers/sina"
+	"github.com/T1anjiu/gostox/providers/tencent"
 )
 
 func main() {

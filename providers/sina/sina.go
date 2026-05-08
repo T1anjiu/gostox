@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	gostox "github.com/T1anjiu/GoStox"
+	gostox "github.com/T1anjiu/gostox"
 	"golang.org/x/text/encoding/simplifiedchinese"
 	"golang.org/x/text/transform"
 )

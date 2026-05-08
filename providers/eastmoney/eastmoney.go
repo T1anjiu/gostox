@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	gostox "github.com/T1anjiu/GoStox"
+	gostox "github.com/T1anjiu/gostox"
 )
 
 const (
