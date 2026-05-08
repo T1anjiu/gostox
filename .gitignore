@@ -1,0 +1,8 @@
+# astock
+astock.exe
+*.exe
+*.test
+*.out
+/vendor/
+.idea/
+.vscode/
