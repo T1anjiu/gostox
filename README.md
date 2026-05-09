@@ -216,7 +216,7 @@ for i, s := range list {
 
 ## StockCode 使用方式
 
-`GoStox` 使用 `StockCode` 统一表示 A 股代码：
+`gostox` 使用 `StockCode` 统一表示 A 股代码：
 
 ```go
 code := gostox.StockCode{Market: gostox.MarketSH, Code: "600000"}
