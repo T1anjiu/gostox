@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	gostox "github.com/T1anjiu/gostox"
+	utls "github.com/refraction-networking/utls"
 )
 
 const (
@@ -62,7 +64,10 @@ func WithUTToken(token string) Option {
 // NewProvider 创建东方财富 Provider。
 func NewProvider(opts ...Option) *Provider {
 	p := &Provider{
-		client:  &http.Client{Timeout: 10 * time.Second},
+		client: &http.Client{
+			Timeout:   10 * time.Second,
+			Transport: newBrowserTransport(),
+		},
 		utToken: defaultUtToken,
 	}
 	for _, opt := range opts {
@@ -454,4 +459,25 @@ type stockListResponse struct {
 			Market int    `json:"f13"`
 		} `json:"diff"`
 	} `json:"data"`
+}
+
+func newBrowserTransport() *http.Transport {
+	return &http.Transport{
+		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			dialer := &net.Dialer{Timeout: 10 * time.Second}
+			conn, err := dialer.DialContext(ctx, "tcp", addr)
+			if err != nil {
+				return nil, err
+			}
+			host, _, _ := net.SplitHostPort(addr)
+			tlsConn := utls.UClient(conn, &utls.Config{ServerName: host}, utls.HelloChrome_Auto)
+			if err := tlsConn.Handshake(); err != nil {
+				conn.Close()
+				return nil, err
+			}
+			return tlsConn, nil
+		},
+		TLSHandshakeTimeout:  10 * time.Second,
+		ResponseHeaderTimeout: 10 * time.Second,
+	}
 }

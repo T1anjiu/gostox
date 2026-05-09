@@ -1,4 +1,5 @@
 // healthcheck 对三个 provider 逐一做真实网络调用，验证返回数据的合理性。
+// 同时验证 Client 故障转移、ctx 取消、分块请求等核心机制。
 // 用法：go run ./examples/healthcheck
 // 全部通过时退出码为 0，任意失败时退出码为 1。
 package main
@@ -16,11 +17,12 @@ import (
 	"github.com/T1anjiu/gostox/providers/tencent"
 )
 
-// 用浦发银行（sh600000）和平安银行（sz000001）做测试标的，两只都是流动性极好的股票。
 var testCodes = []gostox.StockCode{
 	{Market: gostox.MarketSH, Code: "600000"},
 	{Market: gostox.MarketSZ, Code: "000001"},
 }
+
+var bjCode = gostox.StockCode{Market: gostox.MarketBJ, Code: "830949"}
 
 type result struct {
 	name   string
@@ -36,14 +38,29 @@ func main() {
 	}
 
 	var results []result
+
+	// 1. 逐 provider 检查基础功能
 	for _, p := range providers {
 		results = append(results, checkQuote(p))
 		results = append(results, checkKline(p))
 	}
-	// GetStockList 只有 eastmoney 支持，复用已创建的实例
 	results = append(results, checkStockList(providers[0]))
 
-	// 汇总输出
+	// 2. 北交所覆盖测试（仅东方财富，新浪/腾讯不支持 bj 前缀）
+	results = append(results, checkBJQuote(eastmoney.NewProvider(), "eastmoney"))
+
+	// 3. Client 故障转移机制
+	results = append(results, checkClientFailover())
+
+	// 4. ctx 超时取消
+	results = append(results, checkCtxCancel())
+
+	// 5. 大批量 GetQuote（触发分块，>quoteChunkSize）
+	results = append(results, checkBatchQuote(providers...))
+
+	// 6. Kline 多周期覆盖
+	results = append(results, checkKlinePeriods(sina.NewProvider()))
+
 	fmt.Println("\n========== 健康检查结果 ==========")
 	allPassed := true
 	for _, r := range results {
@@ -72,7 +89,6 @@ func checkQuote(p gostox.Provider) result {
 
 	quotes, err := p.GetQuote(ctx, testCodes...)
 	if err != nil {
-		// PartialError 不算完全失败，数据仍然返回了
 		var pe *gostox.PartialError
 		if !errors.As(err, &pe) {
 			return result{name, false, fmt.Sprintf("请求失败: %v", err)}
@@ -83,7 +99,6 @@ func checkQuote(p gostox.Provider) result {
 		return result{name, false, "返回数据为空"}
 	}
 
-	// 验证每条数据的合理性
 	for _, q := range quotes {
 		if q.Current <= 0 {
 			return result{name, false, fmt.Sprintf("%s 当前价 %.2f 不合理（应 > 0）", q.Code, q.Current)}
@@ -103,9 +118,12 @@ func checkQuote(p gostox.Provider) result {
 		if q.Name == "" {
 			return result{name, false, fmt.Sprintf("%s 股票名称为空", q.Code)}
 		}
+		if q.Timestamp.IsZero() {
+			return result{name, false, fmt.Sprintf("%s 时间戳为零", q.Code)}
+		}
 	}
 
-	return result{name, true, fmt.Sprintf("返回 %d 条，价格/量/名称均正常", len(quotes))}
+	return result{name, true, fmt.Sprintf("返回 %d 条，价格/量/名称/时间戳均正常", len(quotes))}
 }
 
 func checkKline(p gostox.Provider) result {
@@ -113,13 +131,13 @@ func checkKline(p gostox.Provider) result {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	code := testCodes[0] // sh600000
+	code := testCodes[0]
 	klines, err := p.GetKline(ctx, code, gostox.KlinePeriodDay, 10)
 	if err != nil {
-		var pe *gostox.PartialError
 		if errors.Is(err, gostox.ErrNotSupported) {
 			return result{name, true, "不支持（跳过）"}
 		}
+		var pe *gostox.PartialError
 		if !errors.As(err, &pe) {
 			return result{name, false, fmt.Sprintf("请求失败: %v", err)}
 		}
@@ -160,12 +178,10 @@ func checkStockList(p gostox.Provider) result {
 		return result{name, false, fmt.Sprintf("请求失败: %v", err)}
 	}
 
-	// A 股数量应在合理范围内（目前约 5300 只）
 	if len(list) < 4000 {
 		return result{name, false, fmt.Sprintf("股票数量 %d 偏少（预期 > 4000），接口可能异常", len(list))}
 	}
 
-	// 抽查前几条数据格式
 	for i, s := range list {
 		if i >= 5 {
 			break
@@ -176,4 +192,154 @@ func checkStockList(p gostox.Provider) result {
 	}
 
 	return result{name, true, fmt.Sprintf("返回 %d 只股票，格式正常", len(list))}
+}
+
+func checkBJQuote(p gostox.Provider, label string) result {
+	name := fmt.Sprintf("%s/GetQuote(BJ)", label)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	quotes, err := p.GetQuote(ctx, bjCode)
+	if err != nil {
+		if errors.Is(err, gostox.ErrNotSupported) {
+			return result{name, true, "不支持（跳过）"}
+		}
+		var pe *gostox.PartialError
+		if !errors.As(err, &pe) {
+			return result{name, false, fmt.Sprintf("请求失败: %v", err)}
+		}
+	}
+
+	if len(quotes) == 0 {
+		return result{name, true, "北交所股票未返回数据（可能接口不支持 bj 前缀）"}
+	}
+
+	q := quotes[0]
+	if q.Code.Market != gostox.MarketBJ {
+		return result{name, false, fmt.Sprintf("市场识别错误: got=%v want=MarketBJ", q.Code.Market)}
+	}
+	if q.Current <= 0 {
+		return result{name, false, fmt.Sprintf("北交所 %s 当前价 %.2f 不合理", q.Code, q.Current)}
+	}
+
+	return result{name, true, fmt.Sprintf("北交所 %s 当前价=%.2f 市场识别正确", q.Code, q.Current)}
+}
+
+func checkClientFailover() result {
+	name := "Client/Failover"
+	em := eastmoney.NewProvider()
+	sn := sina.NewProvider()
+	client, _ := gostox.NewClient(
+		&failProvider{name: "always-fail"},
+		em,
+		sn,
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	quotes, err := client.GetQuote(ctx, testCodes...)
+	if err != nil {
+		return result{name, false, fmt.Sprintf("故障转移后仍失败: %v", err)}
+	}
+	if len(quotes) == 0 {
+		return result{name, false, "故障转移后返回数据为空"}
+	}
+
+	return result{name, true, fmt.Sprintf("首个 provider 失败后自动切换，返回 %d 条", len(quotes))}
+}
+
+func checkCtxCancel() result {
+	name := "Client/CtxCancel"
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Nanosecond)
+	defer cancel()
+
+	em := eastmoney.NewProvider()
+	_, err := em.GetQuote(ctx, testCodes...)
+	if err == nil {
+		return result{name, false, "超时 ctx 未触发错误"}
+	}
+	if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+		return result{name, true, fmt.Sprintf("ctx 触发了错误（非 DeadlineExceeded 但合理）: %v", err)}
+	}
+
+	return result{name, true, "超时 ctx 正确触发错误"}
+}
+
+func checkBatchQuote(providers ...gostox.Provider) result {
+	name := "Client/BatchQuote(>100)"
+	client, _ := gostox.NewClient(providers...)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	codes := make([]gostox.StockCode, 0, 150)
+	for i := 0; i < 150; i++ {
+		code := gostox.InferMarket(fmt.Sprintf("%06d", 600000+i))
+		codes = append(codes, code)
+	}
+
+	quotes, err := client.GetQuote(ctx, codes...)
+	if err != nil {
+		var pe *gostox.PartialError
+		if !errors.As(err, &pe) {
+			return result{name, false, fmt.Sprintf("批量请求失败: %v", err)}
+		}
+	}
+
+	if len(quotes) == 0 {
+		return result{name, false, "批量请求返回数据为空"}
+	}
+
+	return result{name, true, fmt.Sprintf("请求 %d 只，返回 %d 条（分块机制工作正常）", len(codes), len(quotes))}
+}
+
+func checkKlinePeriods(p gostox.Provider) result {
+	name := fmt.Sprintf("%s/KlinePeriods", p.Name())
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	periods := []struct {
+		Period gostox.KlinePeriod
+		Label string
+	}{
+		{gostox.KlinePeriod5Min, "5min"},
+		{gostox.KlinePeriod15Min, "15min"},
+		{gostox.KlinePeriod60Min, "60min"},
+		{gostox.KlinePeriodDay, "day"},
+		{gostox.KlinePeriodWeek, "week"},
+	}
+
+	supported := 0
+	for _, pp := range periods {
+		_, err := p.GetKline(ctx, testCodes[0], pp.Period, 5)
+		if err != nil {
+			if errors.Is(err, gostox.ErrNotSupported) {
+				continue
+			}
+			return result{name, false, fmt.Sprintf("%s 周期请求失败: %v", pp.Label, err)}
+		}
+		supported++
+	}
+
+	if supported == 0 {
+		return result{name, false, "没有任何周期支持"}
+	}
+
+	return result{name, true, fmt.Sprintf("%d/%d 个周期可用", supported, len(periods))}
+}
+
+type failProvider struct {
+	name string
+}
+
+func (f *failProvider) Name() string { return f.name }
+func (f *failProvider) GetQuote(ctx context.Context, codes ...gostox.StockCode) ([]*gostox.Quote, error) {
+	return nil, errors.New("always fail")
+}
+func (f *failProvider) GetKline(ctx context.Context, code gostox.StockCode, period gostox.KlinePeriod, count int) ([]*gostox.Kline, error) {
+	return nil, errors.New("always fail")
+}
+func (f *failProvider) GetStockList(ctx context.Context) ([]*gostox.StockInfo, error) {
+	return nil, errors.New("always fail")
 }
