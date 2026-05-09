@@ -78,8 +78,10 @@ func (p *Provider) GetQuote(ctx context.Context, codes ...gostox.StockCode) ([]*
 		return nil, nil
 	}
 
+	requested := make(map[string]gostox.StockCode, len(codes))
 	tencentCodes := make([]string, 0, len(codes))
 	for _, c := range codes {
+		requested[c.String()] = c
 		tencentCodes = append(tencentCodes, c.TencentCode())
 	}
 
@@ -127,6 +129,7 @@ func (p *Provider) GetQuote(ctx context.Context, codes ...gostox.StockCode) ([]*
 				allParseErrs = append(allParseErrs, fmt.Errorf("parse code %q: %w", m[1], err))
 				continue
 			}
+			delete(requested, code.String())
 			q, err := parseTencentQuote(m[2], code)
 			if err != nil {
 				allParseErrs = append(allParseErrs, fmt.Errorf("parse quote %s: %w", m[1], err))
@@ -134,6 +137,9 @@ func (p *Provider) GetQuote(ctx context.Context, codes ...gostox.StockCode) ([]*
 			}
 			quotes = append(quotes, q)
 		}
+	}
+	for _, missing := range requested {
+		allParseErrs = append(allParseErrs, fmt.Errorf("missing quote for %s", missing))
 	}
 	if len(allParseErrs) > 0 {
 		return quotes, &gostox.PartialError{Failures: allParseErrs}

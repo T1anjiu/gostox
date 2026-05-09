@@ -79,8 +79,10 @@ func (p *Provider) GetQuote(ctx context.Context, codes ...gostox.StockCode) ([]*
 		return nil, nil
 	}
 
+	requested := make(map[string]gostox.StockCode, len(codes))
 	secIDs := make([]string, 0, len(codes))
 	for _, c := range codes {
+		requested[c.String()] = c
 		secIDs = append(secIDs, c.EastmoneyCode())
 	}
 
@@ -117,6 +119,7 @@ func (p *Provider) GetQuote(ctx context.Context, codes ...gostox.StockCode) ([]*
 			parseErrs = append(parseErrs, fmt.Errorf("parse code %q: %w", d.Code, err))
 			continue
 		}
+		delete(requested, code.String())
 		quotes = append(quotes, &gostox.Quote{
 			Code:      code,
 			Name:      d.Name,
@@ -132,6 +135,9 @@ func (p *Provider) GetQuote(ctx context.Context, codes ...gostox.StockCode) ([]*
 			ChangePct: d.ChangePct,
 			Timestamp: now, // 接口不返回 tick 时间，退化为本地时间
 		})
+	}
+	for _, missing := range requested {
+		parseErrs = append(parseErrs, fmt.Errorf("missing quote for %s", missing))
 	}
 	if len(parseErrs) > 0 {
 		return quotes, &gostox.PartialError{Failures: parseErrs}

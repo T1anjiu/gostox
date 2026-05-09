@@ -1,6 +1,8 @@
 package eastmoney
 
 import (
+	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -105,4 +107,36 @@ func TestDoGet_LimitReader(t *testing.T) {
 	if len(body) != maxBodySize {
 		t.Errorf("body size=%d want=%d (should be truncated at maxBodySize)", len(body), maxBodySize)
 	}
+}
+
+func TestGetQuote_ReturnsPartialErrorWhenResponseMissesCodes(t *testing.T) {
+	body := `{"rc":0,"data":{"diff":[{"f2":10.05,"f3":0.7,"f4":0.07,"f5":1234,"f6":9876543.21,"f12":"600000","f13":1,"f14":"浦发银行","f15":10.20,"f16":9.95,"f17":10.00,"f18":9.98}]}}`
+	p := NewProvider(WithHTTPClient(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Header:     make(http.Header),
+		}, nil
+	})}))
+
+	quotes, err := p.GetQuote(context.Background(),
+		gostox.StockCode{Market: gostox.MarketSH, Code: "600000"},
+		gostox.StockCode{Market: gostox.MarketSZ, Code: "000001"},
+	)
+	if len(quotes) != 1 || quotes[0].Code.String() != "sh600000" {
+		t.Fatalf("unexpected quotes: %+v", quotes)
+	}
+	var pe *gostox.PartialError
+	if !errors.As(err, &pe) {
+		t.Fatalf("want PartialError, got %v", err)
+	}
+	if len(pe.Failures) != 1 || !strings.Contains(pe.Failures[0].Error(), "sz000001") {
+		t.Fatalf("unexpected failures: %+v", pe.Failures)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }

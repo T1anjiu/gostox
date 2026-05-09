@@ -1,7 +1,11 @@
 package tencent
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -142,4 +146,36 @@ func TestExtractKlines(t *testing.T) {
 	if klines[0][1] != "9.71" {
 		t.Errorf("first open=%q", klines[0][1])
 	}
+}
+
+func TestGetQuote_ReturnsPartialErrorWhenResponseMissesCodes(t *testing.T) {
+	body := `v_sh600000="0~浦发银行~600000~10.05~9.98~10.00~1234~0~0~0~0~0~0~0~0~0~0~0~0~0~0~0~0~0~0~0~0~0~0~0~20240102150000~0.07~0.70~10.20~9.95~0~0~9876~0~0";`
+	p := NewProvider(WithHTTPClient(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Header:     make(http.Header),
+		}, nil
+	})}))
+
+	quotes, err := p.GetQuote(context.Background(),
+		gostox.StockCode{Market: gostox.MarketSH, Code: "600000"},
+		gostox.StockCode{Market: gostox.MarketSZ, Code: "000001"},
+	)
+	if len(quotes) != 1 || quotes[0].Code.String() != "sh600000" {
+		t.Fatalf("unexpected quotes: %+v", quotes)
+	}
+	var pe *gostox.PartialError
+	if !errors.As(err, &pe) {
+		t.Fatalf("want PartialError, got %v", err)
+	}
+	if len(pe.Failures) != 1 || !strings.Contains(pe.Failures[0].Error(), "sz000001") {
+		t.Fatalf("unexpected failures: %+v", pe.Failures)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }

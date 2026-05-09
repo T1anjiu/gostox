@@ -1,7 +1,10 @@
 package sina
 
 import (
+	"context"
 	"errors"
+	"io"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -131,6 +134,32 @@ func TestParseSinaKlineItem(t *testing.T) {
 	}
 }
 
+func TestGetQuote_ReturnsPartialErrorWhenResponseMissesCodes(t *testing.T) {
+	body := `var hq_str_sh600000="浦发银行,10.00,9.98,10.05,10.20,9.95,0,0,123456,9876543.21,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2024-01-02,15:00:00,00";`
+	p := NewProvider(WithHTTPClient(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Header:     make(http.Header),
+		}, nil
+	})}))
+
+	quotes, err := p.GetQuote(context.Background(),
+		gostox.StockCode{Market: gostox.MarketSH, Code: "600000"},
+		gostox.StockCode{Market: gostox.MarketSZ, Code: "000001"},
+	)
+	if len(quotes) != 1 || quotes[0].Code.String() != "sh600000" {
+		t.Fatalf("unexpected quotes: %+v", quotes)
+	}
+	var pe *gostox.PartialError
+	if !errors.As(err, &pe) {
+		t.Fatalf("want PartialError, got %v", err)
+	}
+	if len(pe.Failures) != 1 || !strings.Contains(pe.Failures[0].Error(), "sz000001") {
+		t.Fatalf("unexpected failures: %+v", pe.Failures)
+	}
+}
+
 // transformString 是测试辅助，等价于 transform.String。
 func transformString(t interface {
 	Transform(dst, src []byte, atEOF bool) (nDst, nSrc int, err error)
@@ -141,4 +170,10 @@ func transformString(t interface {
 	dst := make([]byte, len(src)*4+16)
 	nDst, nSrc, err := t.Transform(dst, src, true)
 	return string(dst[:nDst]), nSrc, err
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }
