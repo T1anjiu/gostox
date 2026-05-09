@@ -4,6 +4,7 @@ package tencent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -79,6 +80,12 @@ func (p *Provider) GetQuote(ctx context.Context, codes ...gostox.StockCode) ([]*
 		return nil, nil
 	}
 
+	for _, c := range codes {
+		if c.Market == gostox.MarketBJ {
+			return nil, gostox.ErrNotSupported
+		}
+	}
+
 	requested := make(map[string]gostox.StockCode, len(codes))
 	tencentCodes := make([]string, 0, len(codes))
 	for _, c := range codes {
@@ -102,14 +109,14 @@ func (p *Provider) GetQuote(ctx context.Context, codes ...gostox.StockCode) ([]*
 		reqURL := quoteURL + strings.Join(chunk, ",")
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 		if err != nil {
-			return nil, err
+			return quotes, err
 		}
 		req.Header.Set("Referer", "https://gu.qq.com")
 		req.Header.Set("User-Agent", userAgent)
 
 		resp, err := p.client.Do(req)
 		if err != nil {
-			return nil, fmt.Errorf("tencent quote: %w", err)
+			return quotes, fmt.Errorf("tencent quote: %w", err)
 		}
 
 		body, err := func() ([]byte, error) {
@@ -120,7 +127,7 @@ func (p *Provider) GetQuote(ctx context.Context, codes ...gostox.StockCode) ([]*
 			return io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
 		}()
 		if err != nil {
-			return nil, err
+			return quotes, err
 		}
 
 		matches := tencentRegex.FindAllStringSubmatch(string(body), -1)
@@ -153,6 +160,10 @@ func (p *Provider) GetQuote(ctx context.Context, codes ...gostox.StockCode) ([]*
 
 // GetKline 查询 K 线。
 func (p *Provider) GetKline(ctx context.Context, code gostox.StockCode, period gostox.KlinePeriod, count int) ([]*gostox.Kline, error) {
+	if code.Market == gostox.MarketBJ {
+		return nil, gostox.ErrNotSupported
+	}
+
 	ktype, qfqKey, err := toTencentKlineType(period)
 	if err != nil {
 		return nil, fmt.Errorf("tencent kline: %w", err)
@@ -196,8 +207,11 @@ func (p *Provider) GetKline(ctx context.Context, code gostox.StockCode, period g
 	}
 
 	rawKlines, err := extractKlines(stockData, qfqKey, ktype)
+	var partialErr *gostox.PartialError
 	if err != nil {
-		return nil, fmt.Errorf("tencent kline: %w", err)
+		if !errors.As(err, &partialErr) {
+			return nil, fmt.Errorf("tencent kline: %w", err)
+		}
 	}
 
 	klines := make([]*gostox.Kline, 0, len(rawKlines))
@@ -210,8 +224,13 @@ func (p *Provider) GetKline(ctx context.Context, code gostox.StockCode, period g
 		}
 		klines = append(klines, k)
 	}
-	if len(parseErrs) > 0 {
-		return klines, &gostox.PartialError{Failures: parseErrs}
+	if len(parseErrs) > 0 || (partialErr != nil && len(partialErr.Failures) > 0) {
+		var allErrs []error
+		allErrs = append(allErrs, parseErrs...)
+		if partialErr != nil {
+			allErrs = append(allErrs, partialErr.Failures...)
+		}
+		return klines, &gostox.PartialError{Failures: allErrs}
 	}
 	return klines, nil
 }

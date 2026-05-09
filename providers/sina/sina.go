@@ -81,6 +81,12 @@ func (p *Provider) GetQuote(ctx context.Context, codes ...gostox.StockCode) ([]*
 		return nil, nil
 	}
 
+	for _, c := range codes {
+		if c.Market == gostox.MarketBJ {
+			return nil, gostox.ErrNotSupported
+		}
+	}
+
 	requested := make(map[string]gostox.StockCode, len(codes))
 	sinaCodes := make([]string, 0, len(codes))
 	for _, c := range codes {
@@ -104,14 +110,14 @@ func (p *Provider) GetQuote(ctx context.Context, codes ...gostox.StockCode) ([]*
 		reqURL := quoteURL + strings.Join(chunk, ",")
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 		if err != nil {
-			return nil, err
+			return quotes, err
 		}
 		req.Header.Set("Referer", "https://finance.sina.com.cn")
 		req.Header.Set("User-Agent", userAgent)
 
 		resp, err := p.client.Do(req)
 		if err != nil {
-			return nil, fmt.Errorf("sina quote: %w", err)
+			return quotes, fmt.Errorf("sina quote: %w", err)
 		}
 
 		body, err := func() ([]byte, error) {
@@ -122,12 +128,12 @@ func (p *Provider) GetQuote(ctx context.Context, codes ...gostox.StockCode) ([]*
 			return io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
 		}()
 		if err != nil {
-			return nil, err
+			return quotes, err
 		}
 
 		text, err := decodeGBK(body)
 		if err != nil {
-			return nil, fmt.Errorf("sina quote decode: %w", err)
+			return quotes, fmt.Errorf("sina quote decode: %w", err)
 		}
 
 		matches := hqRegex.FindAllStringSubmatch(text, -1)
@@ -160,6 +166,10 @@ func (p *Provider) GetQuote(ctx context.Context, codes ...gostox.StockCode) ([]*
 
 // GetKline 查询 K 线。新浪 K 线响应为 UTF-8 JSON，无需解码。
 func (p *Provider) GetKline(ctx context.Context, code gostox.StockCode, period gostox.KlinePeriod, count int) ([]*gostox.Kline, error) {
+	if code.Market == gostox.MarketBJ {
+		return nil, gostox.ErrNotSupported
+	}
+
 	scale, err := toSinaScale(period)
 	if err != nil {
 		return nil, fmt.Errorf("sina kline: %w", err)

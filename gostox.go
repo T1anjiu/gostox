@@ -188,6 +188,11 @@ func NewClient(providers ...Provider) (*Client, error) {
 	if len(providers) == 0 {
 		return nil, errors.New("gostox: at least one provider is required")
 	}
+	for i, p := range providers {
+		if p == nil {
+			return nil, fmt.Errorf("gostox: provider[%d] is nil", i)
+		}
+	}
 	return &Client{providers: providers}, nil
 }
 
@@ -201,6 +206,9 @@ func (c *Client) SetOnProviderFail(fn func(providerName, method string, err erro
 
 // AddProvider 追加一个 provider 到列表末尾。
 func (c *Client) AddProvider(p Provider) {
+	if p == nil {
+		return
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.providers = append(c.providers, p)
