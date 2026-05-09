@@ -17,7 +17,10 @@ func main() {
 	sn := sina.NewProvider()
 	tx := tencent.NewProvider()
 
-	client := gostox.NewClient(em, sn, tx)
+	client, err := gostox.NewClient(em, sn, tx)
+	if err != nil {
+		log.Fatal(err)
+	}
 	client.SetOnProviderFail(func(name, method string, err error) {
 		log.Printf("[warn] provider %s %s failed: %v", name, method, err)
 	})

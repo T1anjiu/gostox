@@ -88,11 +88,13 @@ func (p *Provider) GetQuote(ctx context.Context, codes ...gostox.StockCode) ([]*
 		sinaCodes = append(sinaCodes, c.SinaCode())
 	}
 
-	now := time.Now()
 	var quotes []*gostox.Quote
 	var allParseErrs []error
 
 	for i := 0; i < len(sinaCodes); i += quoteChunkSize {
+		if err := ctx.Err(); err != nil {
+			return quotes, fmt.Errorf("sina quote: %w", err)
+		}
 		end := i + quoteChunkSize
 		if end > len(sinaCodes) {
 			end = len(sinaCodes)
@@ -147,7 +149,6 @@ func (p *Provider) GetQuote(ctx context.Context, codes ...gostox.StockCode) ([]*
 			quotes = append(quotes, q)
 		}
 	}
-	_ = now
 	for _, missing := range requested {
 		allParseErrs = append(allParseErrs, fmt.Errorf("missing quote for %s", missing))
 	}

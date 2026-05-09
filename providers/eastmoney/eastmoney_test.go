@@ -35,13 +35,16 @@ func TestToKlineType(t *testing.T) {
 }
 
 func TestMarketPrefix(t *testing.T) {
-	if got, err := marketPrefix(1); err != nil || got != "sh" {
+	if got, err := marketPrefix(1, "600000"); err != nil || got != "sh" {
 		t.Errorf("marketPrefix(1)=%q want sh", got)
 	}
-	if got, err := marketPrefix(0); err != nil || got != "sz" {
+	if got, err := marketPrefix(0, "000001"); err != nil || got != "sz" {
 		t.Errorf("marketPrefix(0)=%q want sz", got)
 	}
-	if _, err := marketPrefix(2); err == nil {
+	if got, err := marketPrefix(0, "830949"); err != nil || got != "bj" {
+		t.Errorf("marketPrefix(0,830949)=%q want bj", got)
+	}
+	if _, err := marketPrefix(2, "600000"); err == nil {
 		t.Error("want error for unknown market")
 	}
 }

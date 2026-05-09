@@ -130,11 +130,14 @@ import (
 )
 
 func main() {
-	client := gostox.NewClient(
+	client, err := gostox.NewClient(
 		eastmoney.NewProvider(),
 		sina.NewProvider(),
 		tencent.NewProvider(),
 	)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	client.SetOnProviderFail(func(name, method string, err error) {
 		log.Printf("provider %s %s failed: %v", name, method, err)

@@ -21,6 +21,7 @@ const (
 	stockListURL    = "https://push2.eastmoney.com/api/qt/clist/get"
 	defaultUtToken  = "fa5fd1943c7b386f172d6893dbfba10b"
 	maxBodySize     = 4 << 20 // 4MB，单次响应上限
+	quoteChunkSize  = 100     // 每批最多请求 100 只，避免 URL 过长
 )
 
 // 东方财富接口返回字段定义：
@@ -74,6 +75,7 @@ func NewProvider(opts ...Option) *Provider {
 func (p *Provider) Name() string { return "eastmoney" }
 
 // GetQuote 查询多只股票的实时行情。
+// 超过 quoteChunkSize 的请求会自动分批发送。
 func (p *Provider) GetQuote(ctx context.Context, codes ...gostox.StockCode) ([]*gostox.Quote, error) {
 	if len(codes) == 0 {
 		return nil, nil
@@ -86,61 +88,73 @@ func (p *Provider) GetQuote(ctx context.Context, codes ...gostox.StockCode) ([]*
 		secIDs = append(secIDs, c.EastmoneyCode())
 	}
 
-	params := url.Values{}
-	params.Set("fltt", "2") // 2 = 返回真实浮点价格
-	params.Set("secids", strings.Join(secIDs, ","))
-	params.Set("fields", quoteFields)
-	params.Set("ut", p.utToken)
+	now := time.Now() // 东方财富接口不返回逐笔时间戳，此处用本地时钟近似，最多存在数秒偏差
+	var quotes []*gostox.Quote
+	var allParseErrs []error
 
-	body, err := p.doGet(ctx, quoteURL, params)
-	if err != nil {
-		return nil, fmt.Errorf("eastmoney quote: %w", err)
-	}
-
-	var resp quoteResponse
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, fmt.Errorf("eastmoney quote unmarshal: %w", err)
-	}
-	if resp.Rc != 0 {
-		return nil, fmt.Errorf("eastmoney quote api rc=%d", resp.Rc)
-	}
-
-	now := time.Now()
-	quotes := make([]*gostox.Quote, 0, len(resp.Data.Diff))
-	var parseErrs []error
-	for _, d := range resp.Data.Diff {
-		prefix, err := marketPrefix(d.Market)
-		if err != nil {
-			parseErrs = append(parseErrs, fmt.Errorf("parse market for %q: %w", d.Code, err))
-			continue
+	for i := 0; i < len(secIDs); i += quoteChunkSize {
+		if err := ctx.Err(); err != nil {
+			return quotes, fmt.Errorf("eastmoney quote: %w", err)
 		}
-		code, err := gostox.ParseStockCode(prefix + d.Code)
-		if err != nil {
-			parseErrs = append(parseErrs, fmt.Errorf("parse code %q: %w", d.Code, err))
-			continue
+		end := i + quoteChunkSize
+		if end > len(secIDs) {
+			end = len(secIDs)
 		}
-		delete(requested, code.String())
-		quotes = append(quotes, &gostox.Quote{
-			Code:      code,
-			Name:      d.Name,
-			Current:   d.Price,
-			Open:      d.Open,
-			PrevClose: d.PrevClose,
-			Close:     d.Price,
-			High:      d.High,
-			Low:       d.Low,
-			Volume:    d.Volume * 100, // f5 单位为手，×100 转为股，与其他 provider 统一
-			Amount:    d.Amount,
-			Change:    d.Change,
-			ChangePct: d.ChangePct,
-			Timestamp: now, // 接口不返回 tick 时间，退化为本地时间
-		})
+		chunk := secIDs[i:end]
+
+		params := url.Values{}
+		params.Set("fltt", "2") // 2 = 返回真实浮点价格
+		params.Set("secids", strings.Join(chunk, ","))
+		params.Set("fields", quoteFields)
+		params.Set("ut", p.utToken)
+
+		body, err := p.doGet(ctx, quoteURL, params)
+		if err != nil {
+			return quotes, fmt.Errorf("eastmoney quote: %w", err)
+		}
+
+		var resp quoteResponse
+		if err := json.Unmarshal(body, &resp); err != nil {
+			return quotes, fmt.Errorf("eastmoney quote unmarshal: %w", err)
+		}
+		if resp.Rc != 0 {
+			return quotes, fmt.Errorf("eastmoney quote api rc=%d", resp.Rc)
+		}
+
+		for _, d := range resp.Data.Diff {
+			prefix, err := marketPrefix(d.Market, d.Code)
+			if err != nil {
+				allParseErrs = append(allParseErrs, fmt.Errorf("parse market for %q: %w", d.Code, err))
+				continue
+			}
+			code, err := gostox.ParseStockCode(prefix + d.Code)
+			if err != nil {
+				allParseErrs = append(allParseErrs, fmt.Errorf("parse code %q: %w", d.Code, err))
+				continue
+			}
+			delete(requested, code.String())
+			quotes = append(quotes, &gostox.Quote{
+				Code:      code,
+				Name:      d.Name,
+				Current:   d.Price,
+				Open:      d.Open,
+				PrevClose: d.PrevClose,
+				Close:     d.Price,
+				High:      d.High,
+				Low:       d.Low,
+				Volume:    d.Volume * 100, // f5 单位为手，×100 转为股，与其他 provider 统一
+				Amount:    d.Amount,
+				Change:    d.Change,
+				ChangePct: d.ChangePct,
+				Timestamp: now, // 本地时钟，非服务端时间
+			})
+		}
 	}
 	for _, missing := range requested {
-		parseErrs = append(parseErrs, fmt.Errorf("missing quote for %s", missing))
+		allParseErrs = append(allParseErrs, fmt.Errorf("missing quote for %s", missing))
 	}
-	if len(parseErrs) > 0 {
-		return quotes, &gostox.PartialError{Failures: parseErrs}
+	if len(allParseErrs) > 0 {
+		return quotes, &gostox.PartialError{Failures: allParseErrs}
 	}
 	return quotes, nil
 }
@@ -200,7 +214,11 @@ func (p *Provider) GetStockList(ctx context.Context) ([]*gostox.StockInfo, error
 		pageSize         = 100
 		maxStockListPages = 60 // 东方财富限制每页最多 100 条，A 股约 5500 只，需 55 页
 	)
+	var allParseErrs []error
 	for pn := 1; pn <= maxStockListPages; pn++ {
+		if err := ctx.Err(); err != nil {
+			return all, fmt.Errorf("eastmoney stocklist: %w", err)
+		}
 		params := url.Values{}
 		params.Set("pn", strconv.Itoa(pn))
 		params.Set("pz", strconv.Itoa(pageSize))
@@ -215,38 +233,37 @@ func (p *Provider) GetStockList(ctx context.Context) ([]*gostox.StockInfo, error
 
 		body, err := p.doGet(ctx, stockListURL, params)
 		if err != nil {
-			return nil, fmt.Errorf("eastmoney stocklist page %d: %w", pn, err)
+			return all, fmt.Errorf("eastmoney stocklist page %d: %w", pn, err)
 		}
 
 		var resp stockListResponse
 		if err := json.Unmarshal(body, &resp); err != nil {
-			return nil, fmt.Errorf("eastmoney stocklist unmarshal: %w", err)
+			return all, fmt.Errorf("eastmoney stocklist unmarshal: %w", err)
 		}
 		if resp.Rc != 0 {
-			return nil, fmt.Errorf("eastmoney stocklist api rc=%d", resp.Rc)
+			return all, fmt.Errorf("eastmoney stocklist api rc=%d", resp.Rc)
 		}
 
-		var parseErrs []error
 		for _, d := range resp.Data.Diff {
-			prefix, err := marketPrefix(d.Market)
+			prefix, err := marketPrefix(d.Market, d.Code)
 			if err != nil {
-				parseErrs = append(parseErrs, fmt.Errorf("page %d parse market for %q: %w", pn, d.Code, err))
+				allParseErrs = append(allParseErrs, fmt.Errorf("page %d parse market for %q: %w", pn, d.Code, err))
 				continue
 			}
 			code, err := gostox.ParseStockCode(prefix + d.Code)
 			if err != nil {
-				parseErrs = append(parseErrs, fmt.Errorf("page %d parse code %q: %w", pn, d.Code, err))
+				allParseErrs = append(allParseErrs, fmt.Errorf("page %d parse code %q: %w", pn, d.Code, err))
 				continue
 			}
 			all = append(all, &gostox.StockInfo{Code: code, Name: d.Name})
-		}
-		if len(parseErrs) > 0 {
-			return all, &gostox.PartialError{Failures: parseErrs}
 		}
 
 		if len(resp.Data.Diff) < pageSize {
 			break
 		}
+	}
+	if len(allParseErrs) > 0 {
+		return all, &gostox.PartialError{Failures: allParseErrs}
 	}
 	return all, nil
 }
@@ -275,11 +292,14 @@ func (p *Provider) doGet(ctx context.Context, rawURL string, params url.Values) 
 	return io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
 }
 
-func marketPrefix(market int) (string, error) {
+func marketPrefix(market int, code string) (string, error) {
 	if market == 1 {
 		return "sh", nil
 	}
 	if market == 0 {
+		if len(code) > 0 && (code[0] == '8' || code[0] == '4') {
+			return "bj", nil
+		}
 		return "sz", nil
 	}
 	return "", fmt.Errorf("unknown market: %d", market)

@@ -28,6 +28,7 @@ type Market int
 const (
 	MarketSH Market = iota // 上海证券交易所
 	MarketSZ                // 深圳证券交易所
+	MarketBJ                // 北京证券交易所
 )
 
 func (m Market) String() string {
@@ -36,6 +37,8 @@ func (m Market) String() string {
 		return "sh"
 	case MarketSZ:
 		return "sz"
+	case MarketBJ:
+		return "bj"
 	default:
 		return "unknown"
 	}
@@ -48,6 +51,8 @@ func (m Market) EastmoneySecID() string {
 		return "1"
 	case MarketSZ:
 		return "0"
+	case MarketBJ:
+		return "0" // 北交所在东方财富中 market ID 与深市同为 0
 	default:
 		return ""
 	}
@@ -87,6 +92,8 @@ func ParseStockCode(raw string) (StockCode, error) {
 		m = MarketSH
 	case "sz":
 		m = MarketSZ
+	case "bj":
+		m = MarketBJ
 	default:
 		return StockCode{}, fmt.Errorf("unknown market prefix: %q", prefix)
 	}
@@ -104,7 +111,7 @@ func InferMarket(code string) StockCode {
 	case '0', '3':
 		return StockCode{Market: MarketSZ, Code: code}
 	case '8', '4':
-		return StockCode{Market: MarketSZ, Code: code}
+		return StockCode{Market: MarketBJ, Code: code}
 	default:
 		return StockCode{Market: MarketSH, Code: code}
 	}
@@ -131,7 +138,7 @@ type Quote struct {
 	Current   float64
 	Open      float64
 	PrevClose float64
-	Close     float64
+	Close     float64 // 盘中等同于 Current（最新成交价），收盘后为当日收盘价。实时接口无法区分二者。
 	High      float64
 	Low       float64
 	Volume    int64
@@ -176,9 +183,12 @@ type Client struct {
 	onProviderFail func(providerName, method string, err error)
 }
 
-// NewClient 按优先级顺序接收 provider 列表。
-func NewClient(providers ...Provider) *Client {
-	return &Client{providers: providers}
+// NewClient 按优先级顺序接收 provider 列表。至少需要传入一个 provider，否则返回错误。
+func NewClient(providers ...Provider) (*Client, error) {
+	if len(providers) == 0 {
+		return nil, errors.New("gostox: at least one provider is required")
+	}
+	return &Client{providers: providers}, nil
 }
 
 // SetOnProviderFail 设置 provider 失败时的回调函数，可用于打日志、埋点等。

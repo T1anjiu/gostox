@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -89,6 +90,9 @@ func (p *Provider) GetQuote(ctx context.Context, codes ...gostox.StockCode) ([]*
 	var allParseErrs []error
 
 	for i := 0; i < len(tencentCodes); i += quoteChunkSize {
+		if err := ctx.Err(); err != nil {
+			return quotes, fmt.Errorf("tencent quote: %w", err)
+		}
 		end := i + quoteChunkSize
 		if end > len(tencentCodes) {
 			end = len(tencentCodes)
@@ -366,7 +370,7 @@ func parseTencentKlineItem(item []string, code gostox.StockCode, period gostox.K
 		Close:     close_,
 		High:      high,
 		Low:       low,
-		Volume:    int64(vol) * 100, // 单位为手，×100 转为股，与其他 provider 统一
+		Volume:    int64(math.Round(vol * 100)), // 单位为手，×100 转为股，与其他 provider 统一
 		Amount:    amt,
 		Timestamp: ts,
 		Period:    period,
@@ -422,14 +426,16 @@ func extractKlines(data map[string]json.RawMessage, keys ...string) ([][]string,
 		}
 		var items []json.RawMessage
 		if err := json.Unmarshal(raw, &items); err != nil {
-			continue
+			return nil, fmt.Errorf("tencent kline: unmarshal key %q: %w", key, err)
 		}
 		result := make([][]string, 0, len(items))
-		for _, item := range items {
+		var parseErrs []error
+		for i, item := range items {
 			var arr []string
 			if err := json.Unmarshal(item, &arr); err != nil {
 				var mixed []interface{}
-				if err := json.Unmarshal(item, &mixed); err != nil {
+				if err2 := json.Unmarshal(item, &mixed); err2 != nil {
+					parseErrs = append(parseErrs, fmt.Errorf("item %d: unmarshal: %w then %w", i, err, err2))
 					continue
 				}
 				arr = make([]string, 0, len(mixed))
@@ -442,6 +448,9 @@ func extractKlines(data map[string]json.RawMessage, keys ...string) ([][]string,
 				}
 			}
 			result = append(result, arr)
+		}
+		if len(parseErrs) > 0 {
+			return result, &gostox.PartialError{Failures: parseErrs}
 		}
 		return result, nil
 	}

@@ -16,7 +16,7 @@ func TestParseStockCode(t *testing.T) {
 		{"sh600000", MarketSH, "600000", false},
 		{"sz000001", MarketSZ, "000001", false},
 		{"SH600000", MarketSH, "600000", false},
-		{"bj430001", 0, "", true},
+		{"bj430001", MarketBJ, "430001", false},
 		{"x", 0, "", true},
 		{"", 0, "", true},
 	}
@@ -62,6 +62,8 @@ func TestInferMarket(t *testing.T) {
 		"600000": MarketSH,
 		"000001": MarketSZ,
 		"300750": MarketSZ,
+		"830949": MarketBJ,
+		"430047": MarketBJ,
 		"":       MarketSH, // zero value, code ""
 	}
 	for code, want := range cases {
@@ -102,7 +104,7 @@ func (f *fakeProvider) GetStockList(ctx context.Context) ([]*StockInfo, error) {
 
 func TestClient_Failover(t *testing.T) {
 	want := []*Quote{{Name: "ok"}}
-	c := NewClient(
+	c, _ := NewClient(
 		&fakeProvider{name: "p1", err: errors.New("boom")},
 		&fakeProvider{name: "p2", err: ErrNotSupported},
 		&fakeProvider{name: "p3", q: want},
@@ -125,7 +127,7 @@ func TestClient_Failover(t *testing.T) {
 }
 
 func TestClient_AllFail(t *testing.T) {
-	c := NewClient(
+	c, _ := NewClient(
 		&fakeProvider{name: "p1", err: errors.New("e1")},
 		&fakeProvider{name: "p2", err: errors.New("e2")},
 	)
@@ -136,15 +138,18 @@ func TestClient_AllFail(t *testing.T) {
 }
 
 func TestClient_NoProvider(t *testing.T) {
-	c := NewClient()
-	_, err := c.GetQuote(context.Background())
+	_, err := NewClient()
 	if err == nil {
 		t.Fatal("want error for empty providers")
+	}
+	_, err2 := NewClient()
+	if err2 == nil {
+		t.Fatal("NewClient() should return error when no providers given")
 	}
 }
 
 func TestClient_AllNotSupported(t *testing.T) {
-	c := NewClient(
+	c, _ := NewClient(
 		&fakeProvider{name: "p1", err: ErrNotSupported},
 		&fakeProvider{name: "p2", err: ErrNotSupported},
 	)
@@ -156,7 +161,7 @@ func TestClient_AllNotSupported(t *testing.T) {
 
 func TestClient_ErrNotSupported_SkippedNotFailed(t *testing.T) {
 	want := []*Kline{{Open: 1.0}}
-	c := NewClient(
+	c, _ := NewClient(
 		&fakeProvider{name: "sina", err: ErrNotSupported},
 		&fakeProvider{name: "eastmoney", k: want},
 	)
@@ -179,7 +184,7 @@ func TestClient_ErrNotSupported_SkippedNotFailed(t *testing.T) {
 
 func TestClient_PartialErrorReturnedWithoutFailover(t *testing.T) {
 	want := []*Quote{{Name: "partial"}}
-	c := NewClient(
+	c, _ := NewClient(
 		&fakeProvider{name: "p1", q: want, err: &PartialError{Failures: []error{errors.New("bad record")}}},
 		&fakeProvider{name: "p2", q: []*Quote{{Name: "fallback"}}},
 	)
