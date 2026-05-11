@@ -41,6 +41,8 @@ const quoteFields = "f2,f3,f4,f5,f6,f7,f8,f9,f10,f12,f13,f14,f15,f16,f17,f18"
 // K 线字段：f51=日期 f52=开 f53=收 f54=高 f55=低 f56=成交量 f57=成交额
 const klineFields2 = "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61"
 
+// 指数行情 URL 复用 quoteURL，K 线复用 klineURL
+
 // Provider 是东方财富数据源。
 type Provider struct {
 	client  *http.Client
@@ -273,6 +275,127 @@ func (p *Provider) GetStockList(ctx context.Context) ([]*gostox.StockInfo, error
 	return all, nil
 }
 
+// GetIndexQuote 查询指数实时行情。
+func (p *Provider) GetIndexQuote(ctx context.Context, codes ...gostox.IndexCode) ([]*gostox.IndexQuote, error) {
+	if len(codes) == 0 {
+		return nil, nil
+	}
+
+	requested := make(map[string]gostox.IndexCode, len(codes))
+	secIDs := make([]string, 0, len(codes))
+	for _, c := range codes {
+		requested[c.String()] = c
+		secIDs = append(secIDs, c.EastmoneyIndexCode())
+	}
+
+	now := time.Now()
+	var quotes []*gostox.IndexQuote
+	var allParseErrs []error
+
+	for i := 0; i < len(secIDs); i += quoteChunkSize {
+		if err := ctx.Err(); err != nil {
+			return quotes, fmt.Errorf("eastmoney index quote: %w", err)
+		}
+		end := i + quoteChunkSize
+		if end > len(secIDs) {
+			end = len(secIDs)
+		}
+		chunk := secIDs[i:end]
+
+		params := url.Values{}
+		params.Set("fltt", "2")
+		params.Set("secids", strings.Join(chunk, ","))
+		params.Set("fields", quoteFields)
+		params.Set("ut", p.utToken)
+
+		body, err := p.doGet(ctx, quoteURL, params)
+		if err != nil {
+			return quotes, fmt.Errorf("eastmoney index quote: %w", err)
+		}
+
+		var resp quoteResponse
+		if err := json.Unmarshal(body, &resp); err != nil {
+			return quotes, fmt.Errorf("eastmoney index quote unmarshal: %w", err)
+		}
+		if resp.Rc != 0 {
+			return quotes, fmt.Errorf("eastmoney index quote api rc=%d", resp.Rc)
+		}
+
+		for _, d := range resp.Data.Diff {
+			idxCode := gostox.IndexCode{Code: d.Code}
+			delete(requested, idxCode.String())
+			quotes = append(quotes, &gostox.IndexQuote{
+				Code:      idxCode,
+				Name:      d.Name,
+				Current:   d.Price,
+				Open:      d.Open,
+				PrevClose: d.PrevClose,
+				Close:     d.Price,
+				High:      d.High,
+				Low:       d.Low,
+				Volume:    d.Volume * 100,
+				Amount:    d.Amount,
+				Change:    d.Change,
+				ChangePct: d.ChangePct,
+				Timestamp: now,
+			})
+		}
+	}
+	for _, missing := range requested {
+		allParseErrs = append(allParseErrs, fmt.Errorf("missing index quote for %s", missing))
+	}
+	if len(allParseErrs) > 0 {
+		return quotes, &gostox.PartialError{Failures: allParseErrs}
+	}
+	return quotes, nil
+}
+
+// GetIndexKline 查询指数 K 线。
+func (p *Provider) GetIndexKline(ctx context.Context, code gostox.IndexCode, period gostox.KlinePeriod, count int) ([]*gostox.IndexKline, error) {
+	klt, err := toKlineType(period)
+	if err != nil {
+		return nil, fmt.Errorf("eastmoney index kline: %w", err)
+	}
+
+	params := url.Values{}
+	params.Set("secid", code.EastmoneyIndexCode())
+	params.Set("fields1", "f1,f2,f3,f4,f5,f6")
+	params.Set("fields2", klineFields2)
+	params.Set("klt", strconv.Itoa(klt))
+	params.Set("fqt", "1")
+	params.Set("end", "20500101")
+	params.Set("lmt", strconv.Itoa(count))
+	params.Set("ut", p.utToken)
+
+	body, err := p.doGet(ctx, klineURL, params)
+	if err != nil {
+		return nil, fmt.Errorf("eastmoney index kline: %w", err)
+	}
+
+	var resp klineResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("eastmoney index kline unmarshal: %w", err)
+	}
+	if resp.Rc != 0 {
+		return nil, fmt.Errorf("eastmoney index kline api rc=%d", resp.Rc)
+	}
+
+	klines := make([]*gostox.IndexKline, 0, len(resp.Data.Klines))
+	var parseErrs []error
+	for _, line := range resp.Data.Klines {
+		k, err := parseIndexKlineLine(line, code, period)
+		if err != nil {
+			parseErrs = append(parseErrs, err)
+			continue
+		}
+		klines = append(klines, k)
+	}
+	if len(parseErrs) > 0 {
+		return klines, &gostox.PartialError{Failures: parseErrs}
+	}
+	return klines, nil
+}
+
 func (p *Provider) doGet(ctx context.Context, rawURL string, params url.Values) ([]byte, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
@@ -352,12 +475,9 @@ func parseKlineLine(line string, code gostox.StockCode, period gostox.KlinePerio
 		return nil, fmt.Errorf("invalid kline line: %q", line)
 	}
 
-	ts, err := time.Parse("2006-01-02", parts[klIdxTime])
+	ts, err := parseKlineTimestamp(parts[klIdxTime])
 	if err != nil {
-		ts, err = time.Parse("2006-01-02 15:04", parts[klIdxTime])
-		if err != nil {
-			return nil, fmt.Errorf("parse kline time %q: %w", parts[klIdxTime], err)
-		}
+		return nil, err
 	}
 
 	open, err := parseEastmoneyFloat(parts[klIdxOpen], "open")
@@ -391,11 +511,71 @@ func parseKlineLine(line string, code gostox.StockCode, period gostox.KlinePerio
 		Close:     close_,
 		High:      high,
 		Low:       low,
-		Volume:    vol * 100, // f56 单位为手，×100 转为股，与其他 provider 统一
+		Volume:    vol * 100,
 		Amount:    amt,
 		Timestamp: ts,
 		Period:    period,
 	}, nil
+}
+
+func parseIndexKlineLine(line string, code gostox.IndexCode, period gostox.KlinePeriod) (*gostox.IndexKline, error) {
+	parts := strings.Split(line, ",")
+	if len(parts) < klineMinLen {
+		return nil, fmt.Errorf("invalid index kline line: %q", line)
+	}
+
+	ts, err := parseKlineTimestamp(parts[klIdxTime])
+	if err != nil {
+		return nil, err
+	}
+
+	open, err := parseEastmoneyFloat(parts[klIdxOpen], "open")
+	if err != nil {
+		return nil, err
+	}
+	close_, err := parseEastmoneyFloat(parts[klIdxClose], "close")
+	if err != nil {
+		return nil, err
+	}
+	high, err := parseEastmoneyFloat(parts[klIdxHigh], "high")
+	if err != nil {
+		return nil, err
+	}
+	low, err := parseEastmoneyFloat(parts[klIdxLow], "low")
+	if err != nil {
+		return nil, err
+	}
+	vol, err := parseEastmoneyInt(parts[klIdxVolume], "volume")
+	if err != nil {
+		return nil, err
+	}
+	amt, err := parseEastmoneyFloat(parts[klIdxAmount], "amount")
+	if err != nil {
+		return nil, err
+	}
+
+	return &gostox.IndexKline{
+		Code:      code,
+		Open:      open,
+		Close:     close_,
+		High:      high,
+		Low:       low,
+		Volume:    vol * 100,
+		Amount:    amt,
+		Timestamp: ts,
+		Period:    period,
+	}, nil
+}
+
+func parseKlineTimestamp(raw string) (time.Time, error) {
+	ts, err := time.Parse("2006-01-02", raw)
+	if err != nil {
+		ts, err = time.Parse("2006-01-02 15:04", raw)
+		if err != nil {
+			return time.Time{}, fmt.Errorf("parse kline time %q: %w", raw, err)
+		}
+	}
+	return ts, nil
 }
 
 func parseEastmoneyFloat(raw, field string) (float64, error) {

@@ -24,6 +24,11 @@ var testCodes = []gostox.StockCode{
 
 var bjCode = gostox.StockCode{Market: gostox.MarketBJ, Code: "830949"}
 
+var testIndexes = []gostox.IndexCode{
+	{Code: "000001"}, // 上证指数
+	{Code: "399001"}, // 深证成指
+}
+
 type result struct {
 	name   string
 	passed bool
@@ -60,6 +65,10 @@ func main() {
 
 	// 6. Kline 多周期覆盖
 	results = append(results, checkKlinePeriods(sina.NewProvider()))
+
+	// 7. 指数行情
+	results = append(results, checkIndexQuote(providers[0]))
+	results = append(results, checkIndexKline(providers[0]))
 
 	fmt.Println("\n========== 健康检查结果 ==========")
 	allPassed := true
@@ -329,6 +338,80 @@ func checkKlinePeriods(p gostox.Provider) result {
 	return result{name, true, fmt.Sprintf("%d/%d 个周期可用", supported, len(periods))}
 }
 
+func checkIndexQuote(p gostox.Provider) result {
+	name := fmt.Sprintf("%s/GetIndexQuote", p.Name())
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	quotes, err := p.GetIndexQuote(ctx, testIndexes...)
+	if err != nil {
+		if errors.Is(err, gostox.ErrNotSupported) {
+			return result{name, true, "不支持（跳过）"}
+		}
+		var pe *gostox.PartialError
+		if !errors.As(err, &pe) {
+			return result{name, false, fmt.Sprintf("请求失败: %v", err)}
+		}
+	}
+
+	if len(quotes) == 0 {
+		return result{name, false, "返回数据为空"}
+	}
+
+	for _, q := range quotes {
+		if q.Current <= 0 {
+			return result{name, false, fmt.Sprintf("%s 当前价 %.2f 不合理（应 > 0）", q.Code, q.Current)}
+		}
+		if q.Open <= 0 || q.PrevClose <= 0 {
+			return result{name, false, fmt.Sprintf("%s 开盘价 %.2f 或昨收 %.2f 不合理", q.Code, q.Open, q.PrevClose)}
+		}
+		if q.High < q.Low {
+			return result{name, false, fmt.Sprintf("%s 最高价 %.2f < 最低价 %.2f", q.Code, q.High, q.Low)}
+		}
+		if q.Name == "" {
+			return result{name, false, fmt.Sprintf("%s 指数名称为空", q.Code)}
+		}
+	}
+
+	return result{name, true, fmt.Sprintf("返回 %d 个指数，数据合理", len(quotes))}
+}
+
+func checkIndexKline(p gostox.Provider) result {
+	name := fmt.Sprintf("%s/GetIndexKline", p.Name())
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	code := testIndexes[0]
+	klines, err := p.GetIndexKline(ctx, code, gostox.KlinePeriodDay, 10)
+	if err != nil {
+		if errors.Is(err, gostox.ErrNotSupported) {
+			return result{name, true, "不支持（跳过）"}
+		}
+		var pe *gostox.PartialError
+		if !errors.As(err, &pe) {
+			return result{name, false, fmt.Sprintf("请求失败: %v", err)}
+		}
+	}
+
+	if len(klines) == 0 {
+		return result{name, false, "返回数据为空"}
+	}
+
+	for _, k := range klines {
+		if k.Open <= 0 || k.Close <= 0 || k.High <= 0 || k.Low <= 0 {
+			return result{name, false, fmt.Sprintf("%s K线价格含零值: O=%.2f C=%.2f H=%.2f L=%.2f", k.Timestamp.Format("2006-01-02"), k.Open, k.Close, k.High, k.Low)}
+		}
+		if k.High < k.Low {
+			return result{name, false, fmt.Sprintf("%s 最高价 %.2f < 最低价 %.2f", k.Timestamp.Format("2006-01-02"), k.High, k.Low)}
+		}
+		if k.Timestamp.IsZero() {
+			return result{name, false, "存在时间戳为零的 K 线"}
+		}
+	}
+
+	return result{name, true, fmt.Sprintf("返回 %d 根 K 线，OHLCV 均正常", len(klines))}
+}
+
 type failProvider struct {
 	name string
 }
@@ -342,4 +425,10 @@ func (f *failProvider) GetKline(ctx context.Context, code gostox.StockCode, peri
 }
 func (f *failProvider) GetStockList(ctx context.Context) ([]*gostox.StockInfo, error) {
 	return nil, errors.New("always fail")
+}
+func (f *failProvider) GetIndexQuote(ctx context.Context, codes ...gostox.IndexCode) ([]*gostox.IndexQuote, error) {
+	return nil, gostox.ErrNotSupported
+}
+func (f *failProvider) GetIndexKline(ctx context.Context, code gostox.IndexCode, period gostox.KlinePeriod, count int) ([]*gostox.IndexKline, error) {
+	return nil, gostox.ErrNotSupported
 }

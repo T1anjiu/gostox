@@ -12,11 +12,11 @@
 
 ## 特性
 
-- 统一的 `Quote`、`Kline`、`StockInfo` 数据模型
+- 统一的 `Quote`、`Kline`、`StockInfo`、`IndexQuote`、`IndexKline` 数据模型
 - 支持多 provider 顺序降级
 - 所有接口都支持 `context.Context`
-- 支持批量实时行情查询
-- 支持分钟级和日周月 K 线
+- 支持批量实时行情查询（含指数）
+- 支持分钟级和日周月 K 线（含指数 K 线）
 - 支持东方财富 A 股股票列表
 - 对部分解析失败返回 `PartialError`，保留已成功解析的数据
 
@@ -24,17 +24,17 @@
 
 当前版本的支持范围比较明确：
 
-- 市场：沪深 A 股
-- 数据类型：实时快照、K 线、股票列表
+- 市场：沪深 A 股，指数（上证、深证、创业板等）
+- 数据类型：实时快照、K 线、指数行情、指数 K 线、股票列表
 - provider：东方财富、新浪、腾讯
 
 ### Provider 能力对比
 
-| Provider | GetQuote | GetKline | GetStockList |
-| --- | --- | --- | --- |
-| `eastmoney` | Yes | Yes | Yes |
-| `sina` | Yes | Yes | No |
-| `tencent` | Yes | Yes | No |
+| Provider | GetQuote | GetKline | GetStockList | GetIndexQuote | GetIndexKline |
+| --- | --- | --- | --- | --- | --- |
+| `eastmoney` | Yes | Yes | Yes | Yes | Yes |
+| `sina` | Yes | Yes | No | No | No |
+| `tencent` | Yes | Yes | No | No | No |
 
 ### K 线周期支持
 
@@ -216,6 +216,70 @@ for i, s := range list {
 	fmt.Printf("%s %s\n", s.Code, s.Name)
 }
 ```
+
+### 6. 获取指数行情
+
+```go
+ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+defer cancel()
+
+quotes, err := client.GetIndexQuote(ctx,
+	gostox.IndexCode{Code: "000001"}, // 上证指数
+	gostox.IndexCode{Code: "399001"}, // 深证成指
+	gostox.IndexCode{Code: "399006"}, // 创业板指
+)
+if err != nil {
+	log.Fatal(err)
+}
+
+for _, q := range quotes {
+	fmt.Printf("%s %s | 现:%.2f 涨跌:%+.2f (%+.2f%%)\n",
+		q.Code, q.Name, q.Current, q.Change, q.ChangePct)
+}
+```
+
+### 7. 获取指数 K 线
+
+```go
+ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+defer cancel()
+
+klines, err := client.GetIndexKline(ctx,
+	gostox.IndexCode{Code: "000001"},
+	gostox.KlinePeriodDay,
+	5,
+)
+if err != nil {
+	log.Fatal(err)
+}
+
+for _, k := range klines {
+	fmt.Printf("%s O=%.2f C=%.2f H=%.2f L=%.2f V=%d\n",
+		k.Timestamp.Format("2006-01-02"),
+		k.Open, k.Close, k.High, k.Low, k.Volume,
+	)
+}
+```
+
+## IndexCode 使用方式
+
+```go
+ic := gostox.IndexCode{Code: "000001"}
+fmt.Println(ic.String())             // 000001
+fmt.Println(ic.EastmoneyIndexCode()) // 1.000001
+```
+
+常用指数代码：
+
+| 代码 | 名称 |
+| --- | --- |
+| 000001 | 上证指数 |
+| 000016 | 上证50 |
+| 000300 | 沪深300 |
+| 000688 | 科创50 |
+| 000905 | 中证500 |
+| 399001 | 深证成指 |
+| 399006 | 创业板指 |
 
 ## StockCode 使用方式
 

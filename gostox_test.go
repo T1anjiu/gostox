@@ -85,6 +85,8 @@ type fakeProvider struct {
 	name string
 	q    []*Quote
 	k    []*Kline
+	iq   []*IndexQuote
+	ik   []*IndexKline
 	err  error
 }
 
@@ -99,6 +101,15 @@ func (f *fakeProvider) GetKline(ctx context.Context, code StockCode, period Klin
 	return nil, f.err
 }
 func (f *fakeProvider) GetStockList(ctx context.Context) ([]*StockInfo, error) {
+	return nil, f.err
+}
+func (f *fakeProvider) GetIndexQuote(ctx context.Context, codes ...IndexCode) ([]*IndexQuote, error) {
+	return f.iq, f.err
+}
+func (f *fakeProvider) GetIndexKline(ctx context.Context, code IndexCode, period KlinePeriod, count int) ([]*IndexKline, error) {
+	if f.ik != nil {
+		return f.ik, nil
+	}
 	return nil, f.err
 }
 
@@ -159,6 +170,17 @@ func TestClient_AllNotSupported(t *testing.T) {
 	}
 }
 
+func TestClient_IndexAllNotSupported(t *testing.T) {
+	c, _ := NewClient(
+		&fakeProvider{name: "p1", err: ErrNotSupported},
+		&fakeProvider{name: "p2", err: ErrNotSupported},
+	)
+	_, err := c.GetIndexQuote(context.Background(), IndexCode{Code: "000001"})
+	if err == nil {
+		t.Fatal("want error when no provider supports GetIndexQuote")
+	}
+}
+
 func TestClient_ErrNotSupported_SkippedNotFailed(t *testing.T) {
 	want := []*Kline{{Open: 1.0}}
 	c, _ := NewClient(
@@ -203,5 +225,84 @@ func TestClient_PartialErrorReturnedWithoutFailover(t *testing.T) {
 	}
 	if len(failed) != 0 {
 		t.Fatalf("unexpected provider fail callbacks: %v", failed)
+	}
+}
+
+func TestClient_IndexQuote(t *testing.T) {
+	want := []*IndexQuote{{Name: "上证指数"}}
+	c, _ := NewClient(
+		&fakeProvider{name: "p1", iq: want},
+	)
+	got, err := c.GetIndexQuote(context.Background(),
+		IndexCode{Code: "000001"},
+	)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if len(got) != 1 || got[0].Name != "上证指数" {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestClient_IndexKline(t *testing.T) {
+	want := []*IndexKline{{Open: 3000.0}}
+	c, _ := NewClient(
+		&fakeProvider{name: "p1", ik: want},
+	)
+	got, err := c.GetIndexKline(context.Background(),
+		IndexCode{Code: "000001"},
+		KlinePeriodDay,
+		5,
+	)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if len(got) != 1 || got[0].Open != 3000.0 {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestClient_IndexQuoteFailover(t *testing.T) {
+	want := []*IndexQuote{{Name: "上证指数"}}
+	c, _ := NewClient(
+		&fakeProvider{name: "p1", err: errors.New("boom")},
+		&fakeProvider{name: "p2", iq: want},
+	)
+	var failed []string
+	c.SetOnProviderFail(func(name, method string, err error) {
+		failed = append(failed, name)
+	})
+
+	got, err := c.GetIndexQuote(context.Background(), IndexCode{Code: "000001"})
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if len(got) != 1 || got[0].Name != "上证指数" {
+		t.Fatalf("got %+v", got)
+	}
+	if len(failed) != 1 || failed[0] != "p1" {
+		t.Errorf("OnProviderFail called with %v", failed)
+	}
+}
+
+func TestIndexCodeFormatters(t *testing.T) {
+	codes := []struct {
+		raw    string
+		emCode string
+	}{
+		{"000001", "1.000001"},
+		{"399001", "0.399001"},
+		{"399006", "0.399006"},
+		{"000016", "1.000016"},
+		{"000688", "1.000688"},
+	}
+	for _, tc := range codes {
+		ic := IndexCode{Code: tc.raw}
+		if got := ic.EastmoneyIndexCode(); got != tc.emCode {
+			t.Errorf("EastmoneyIndexCode(%q)=%q, want %q", tc.raw, got, tc.emCode)
+		}
+	}
+	if got := (IndexCode{Code: ""}).EastmoneyIndexCode(); got != "" {
+		t.Errorf("empty code EastmoneyIndexCode=%q, want empty", got)
 	}
 }

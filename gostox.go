@@ -167,6 +167,58 @@ type StockInfo struct {
 	Name string
 }
 
+// IndexCode 唯一标识一个指数。
+type IndexCode struct {
+	Code string
+}
+
+func (i IndexCode) String() string {
+	return i.Code
+}
+
+// EastmoneyIndexCode 返回东方财富指数 secid 格式，如 1.000001（上证指数）。
+// 深证指数（399开头）使用 0 前缀，其余指数使用 1 前缀。
+func (i IndexCode) EastmoneyIndexCode() string {
+	code := i.Code
+	if code == "" {
+		return ""
+	}
+	if len(code) >= 3 && code[:3] == "399" {
+		return "0." + code
+	}
+	return "1." + code
+}
+
+// IndexQuote 表示指数实时行情快照。
+type IndexQuote struct {
+	Code      IndexCode
+	Name      string
+	Current   float64
+	Open      float64
+	PrevClose float64
+	Close     float64
+	High      float64
+	Low       float64
+	Volume    int64
+	Amount    float64
+	Change    float64
+	ChangePct float64
+	Timestamp time.Time
+}
+
+// IndexKline 表示指数 K 线。
+type IndexKline struct {
+	Code      IndexCode
+	Open      float64
+	Close     float64
+	High      float64
+	Low       float64
+	Volume    int64
+	Amount    float64
+	Timestamp time.Time
+	Period    KlinePeriod
+}
+
 // Provider 定义一个行情数据提供方。
 // 所有方法都带 context，以便调用方传递超时与取消。
 type Provider interface {
@@ -174,6 +226,8 @@ type Provider interface {
 	GetQuote(ctx context.Context, codes ...StockCode) ([]*Quote, error)
 	GetKline(ctx context.Context, code StockCode, period KlinePeriod, count int) ([]*Kline, error)
 	GetStockList(ctx context.Context) ([]*StockInfo, error)
+	GetIndexQuote(ctx context.Context, codes ...IndexCode) ([]*IndexQuote, error)
+	GetIndexKline(ctx context.Context, code IndexCode, period KlinePeriod, count int) ([]*IndexKline, error)
 }
 
 // Client 在多个 provider 之间做故障转移。
@@ -284,5 +338,19 @@ func (c *Client) GetKline(ctx context.Context, code StockCode, period KlinePerio
 func (c *Client) GetStockList(ctx context.Context) ([]*StockInfo, error) {
 	return tryProviders(c, "GetStockList", func(p Provider) ([]*StockInfo, error) {
 		return p.GetStockList(ctx)
+	})
+}
+
+// GetIndexQuote 按 provider 顺序尝试获取指数实时行情。
+func (c *Client) GetIndexQuote(ctx context.Context, codes ...IndexCode) ([]*IndexQuote, error) {
+	return tryProviders(c, "GetIndexQuote", func(p Provider) ([]*IndexQuote, error) {
+		return p.GetIndexQuote(ctx, codes...)
+	})
+}
+
+// GetIndexKline 按 provider 顺序尝试获取指数 K 线。
+func (c *Client) GetIndexKline(ctx context.Context, code IndexCode, period KlinePeriod, count int) ([]*IndexKline, error) {
+	return tryProviders(c, "GetIndexKline", func(p Provider) ([]*IndexKline, error) {
+		return p.GetIndexKline(ctx, code, period, count)
 	})
 }

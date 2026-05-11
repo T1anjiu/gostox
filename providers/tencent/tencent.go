@@ -240,6 +240,16 @@ func (p *Provider) GetStockList(ctx context.Context) ([]*gostox.StockInfo, error
 	return nil, gostox.ErrNotSupported
 }
 
+// GetIndexQuote 腾讯不支持指数行情。
+func (p *Provider) GetIndexQuote(ctx context.Context, codes ...gostox.IndexCode) ([]*gostox.IndexQuote, error) {
+	return nil, gostox.ErrNotSupported
+}
+
+// GetIndexKline 腾讯不支持指数 K 线。
+func (p *Provider) GetIndexKline(ctx context.Context, code gostox.IndexCode, period gostox.KlinePeriod, count int) ([]*gostox.IndexKline, error) {
+	return nil, gostox.ErrNotSupported
+}
+
 func parseTencentQuote(raw string, code gostox.StockCode) (*gostox.Quote, error) {
 	fields := strings.Split(raw, "~")
 	if len(fields) < tqMinFields {
