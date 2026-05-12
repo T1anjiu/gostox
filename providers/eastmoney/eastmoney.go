@@ -4,6 +4,7 @@ package eastmoney
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -15,6 +16,8 @@ import (
 
 	gostox "github.com/T1anjiu/gostox"
 	utls "github.com/refraction-networking/utls"
+	"golang.org/x/sync/errgroup"
+	"golang.org/x/time/rate"
 )
 
 const (
@@ -45,8 +48,12 @@ const klineFields2 = "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61"
 
 // Provider 是东方财富数据源。
 type Provider struct {
-	client  *http.Client
-	utToken string
+	client      *http.Client
+	utToken     string
+	limiter     *rate.Limiter
+	maxRetries  int
+	retryBase   time.Duration
+	concurrency int
 }
 
 // Option 配置 Provider。
@@ -63,6 +70,28 @@ func WithUTToken(token string) Option {
 	return func(p *Provider) { p.utToken = token }
 }
 
+// WithRateLimit 设置每秒最大请求数（QPS）。默认 5。
+func WithRateLimit(rps float64) Option {
+	return func(p *Provider) {
+		p.limiter = rate.NewLimiter(rate.Limit(rps), 1)
+	}
+}
+
+// WithRetry 设置最大重试次数和初始等待时长。默认重试 2 次，初始 200ms。
+func WithRetry(maxRetries int, baseDelay time.Duration) Option {
+	return func(p *Provider) {
+		p.maxRetries = maxRetries
+		p.retryBase = baseDelay
+	}
+}
+
+// WithConcurrency 设置并发分块请求的最大并发数。默认 5。
+func WithConcurrency(n int) Option {
+	return func(p *Provider) {
+		p.concurrency = n
+	}
+}
+
 // NewProvider 创建东方财富 Provider。
 func NewProvider(opts ...Option) *Provider {
 	p := &Provider{
@@ -70,7 +99,11 @@ func NewProvider(opts ...Option) *Provider {
 			Timeout:   10 * time.Second,
 			Transport: newBrowserTransport(),
 		},
-		utToken: defaultUtToken,
+		utToken:     defaultUtToken,
+		limiter:     rate.NewLimiter(5, 1),
+		maxRetries:  2,
+		retryBase:   200 * time.Millisecond,
+		concurrency: 5,
 	}
 	for _, opt := range opts {
 		opt(p)
@@ -82,7 +115,7 @@ func NewProvider(opts ...Option) *Provider {
 func (p *Provider) Name() string { return "eastmoney" }
 
 // GetQuote 查询多只股票的实时行情。
-// 超过 quoteChunkSize 的请求会自动分批发送。
+// 超过 quoteChunkSize 的请求会自动分批并发发送。
 func (p *Provider) GetQuote(ctx context.Context, codes ...gostox.StockCode) ([]*gostox.Quote, error) {
 	if len(codes) == 0 {
 		return nil, nil
@@ -95,70 +128,115 @@ func (p *Provider) GetQuote(ctx context.Context, codes ...gostox.StockCode) ([]*
 		secIDs = append(secIDs, c.EastmoneyCode())
 	}
 
-	now := time.Now() // 东方财富接口不返回逐笔时间戳，此处用本地时钟近似，最多存在数秒偏差
-	var quotes []*gostox.Quote
-	var allParseErrs []error
-
+	// 分批
+	type chunk struct {
+		secIDs  []string
+		codes   map[string]gostox.StockCode
+		now     time.Time
+		index   int
+	}
+	var chunks []chunk
 	for i := 0; i < len(secIDs); i += quoteChunkSize {
-		if err := ctx.Err(); err != nil {
-			return quotes, fmt.Errorf("eastmoney quote: %w", err)
-		}
 		end := i + quoteChunkSize
 		if end > len(secIDs) {
 			end = len(secIDs)
 		}
-		chunk := secIDs[i:end]
-
-		params := url.Values{}
-		params.Set("fltt", "2") // 2 = 返回真实浮点价格
-		params.Set("secids", strings.Join(chunk, ","))
-		params.Set("fields", quoteFields)
-		params.Set("ut", p.utToken)
-
-		body, err := p.doGet(ctx, quoteURL, params)
-		if err != nil {
-			return quotes, fmt.Errorf("eastmoney quote: %w", err)
-		}
-
-		var resp quoteResponse
-		if err := json.Unmarshal(body, &resp); err != nil {
-			return quotes, fmt.Errorf("eastmoney quote unmarshal: %w", err)
-		}
-		if resp.Rc != 0 {
-			return quotes, fmt.Errorf("eastmoney quote api rc=%d", resp.Rc)
-		}
-
-		for _, d := range resp.Data.Diff {
-			prefix, err := marketPrefix(d.Market, d.Code)
-			if err != nil {
-				allParseErrs = append(allParseErrs, fmt.Errorf("parse market for %q: %w", d.Code, err))
-				continue
-			}
-			code, err := gostox.ParseStockCode(prefix + d.Code)
-			if err != nil {
-				allParseErrs = append(allParseErrs, fmt.Errorf("parse code %q: %w", d.Code, err))
-				continue
-			}
-			delete(requested, code.String())
-			quotes = append(quotes, &gostox.Quote{
-				Code:      code,
-				Name:      d.Name,
-				Current:   d.Price,
-				Open:      d.Open,
-				PrevClose: d.PrevClose,
-				Close:     d.Price,
-				High:      d.High,
-				Low:       d.Low,
-				Volume:    d.Volume * 100, // f5 单位为手，×100 转为股，与其他 provider 统一
-				Amount:    d.Amount,
-				Change:    d.Change,
-				ChangePct: d.ChangePct,
-				Timestamp: now, // 本地时钟，非服务端时间
-			})
-		}
+		chunks = append(chunks, chunk{
+			secIDs: secIDs[i:end],
+			codes:  requested,
+			now:    time.Now(),
+			index:  len(chunks),
+		})
 	}
-	for _, missing := range requested {
-		allParseErrs = append(allParseErrs, fmt.Errorf("missing quote for %s", missing))
+
+	type chunkResult struct {
+		quotes    []*gostox.Quote
+		parseErrs []error
+	}
+	results := make([]chunkResult, len(chunks))
+
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(p.concurrency)
+
+	for i := range chunks {
+		i := i
+		ch := chunks[i]
+		g.Go(func() error {
+			if err := gctx.Err(); err != nil {
+				return err
+			}
+
+			params := url.Values{}
+			params.Set("fltt", "2")
+			params.Set("secids", strings.Join(ch.secIDs, ","))
+			params.Set("fields", quoteFields)
+			params.Set("ut", p.utToken)
+
+			body, err := p.doGet(gctx, quoteURL, params)
+			if err != nil {
+				return fmt.Errorf("eastmoney quote: %w", err)
+			}
+
+			var resp quoteResponse
+			if err := json.Unmarshal(body, &resp); err != nil {
+				return fmt.Errorf("eastmoney quote unmarshal: %w", err)
+			}
+			if resp.Rc != 0 {
+				return fmt.Errorf("eastmoney quote api rc=%d", resp.Rc)
+			}
+
+			var quotes []*gostox.Quote
+			var parseErrs []error
+			for _, d := range resp.Data.Diff {
+				prefix, err := marketPrefix(d.Market, d.Code)
+				if err != nil {
+					parseErrs = append(parseErrs, fmt.Errorf("parse market for %q: %w", d.Code, err))
+					continue
+				}
+				code, err := gostox.ParseStockCode(prefix + d.Code)
+				if err != nil {
+					parseErrs = append(parseErrs, fmt.Errorf("parse code %q: %w", d.Code, err))
+					continue
+				}
+				quotes = append(quotes, &gostox.Quote{
+					Code:      code,
+					Name:      d.Name,
+					Current:   d.Price,
+					Open:      d.Open,
+					PrevClose: d.PrevClose,
+					Close:     d.Price,
+					High:      d.High,
+					Low:       d.Low,
+					Volume:    d.Volume * 100,
+					Amount:    d.Amount,
+					Change:    d.Change,
+					ChangePct: d.ChangePct,
+					Timestamp: ch.now,
+				})
+			}
+			results[i] = chunkResult{quotes: quotes, parseErrs: parseErrs}
+			return nil
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+
+	var quotes []*gostox.Quote
+	var allParseErrs []error
+	found := make(map[string]bool, len(secIDs))
+	for _, r := range results {
+		for _, q := range r.quotes {
+			found[q.Code.String()] = true
+		}
+		quotes = append(quotes, r.quotes...)
+		allParseErrs = append(allParseErrs, r.parseErrs...)
+	}
+	for _, c := range codes {
+		if !found[c.String()] {
+			allParseErrs = append(allParseErrs, fmt.Errorf("missing quote for %s", c))
+		}
 	}
 	if len(allParseErrs) > 0 {
 		return quotes, &gostox.PartialError{Failures: allParseErrs}
@@ -288,61 +366,99 @@ func (p *Provider) GetIndexQuote(ctx context.Context, codes ...gostox.IndexCode)
 		secIDs = append(secIDs, c.EastmoneyIndexCode())
 	}
 
-	now := time.Now()
-	var quotes []*gostox.IndexQuote
-	var allParseErrs []error
-
+	type chunk struct {
+		secIDs []string
+		now    time.Time
+		index  int
+	}
+	var chunks []chunk
 	for i := 0; i < len(secIDs); i += quoteChunkSize {
-		if err := ctx.Err(); err != nil {
-			return quotes, fmt.Errorf("eastmoney index quote: %w", err)
-		}
 		end := i + quoteChunkSize
 		if end > len(secIDs) {
 			end = len(secIDs)
 		}
-		chunk := secIDs[i:end]
-
-		params := url.Values{}
-		params.Set("fltt", "2")
-		params.Set("secids", strings.Join(chunk, ","))
-		params.Set("fields", quoteFields)
-		params.Set("ut", p.utToken)
-
-		body, err := p.doGet(ctx, quoteURL, params)
-		if err != nil {
-			return quotes, fmt.Errorf("eastmoney index quote: %w", err)
-		}
-
-		var resp quoteResponse
-		if err := json.Unmarshal(body, &resp); err != nil {
-			return quotes, fmt.Errorf("eastmoney index quote unmarshal: %w", err)
-		}
-		if resp.Rc != 0 {
-			return quotes, fmt.Errorf("eastmoney index quote api rc=%d", resp.Rc)
-		}
-
-		for _, d := range resp.Data.Diff {
-			idxCode := gostox.IndexCode{Code: d.Code}
-			delete(requested, idxCode.String())
-			quotes = append(quotes, &gostox.IndexQuote{
-				Code:      idxCode,
-				Name:      d.Name,
-				Current:   d.Price,
-				Open:      d.Open,
-				PrevClose: d.PrevClose,
-				Close:     d.Price,
-				High:      d.High,
-				Low:       d.Low,
-				Volume:    d.Volume * 100,
-				Amount:    d.Amount,
-				Change:    d.Change,
-				ChangePct: d.ChangePct,
-				Timestamp: now,
-			})
-		}
+		chunks = append(chunks, chunk{secIDs: secIDs[i:end], now: time.Now(), index: len(chunks)})
 	}
-	for _, missing := range requested {
-		allParseErrs = append(allParseErrs, fmt.Errorf("missing index quote for %s", missing))
+
+	type chunkResult struct {
+		quotes    []*gostox.IndexQuote
+		parseErrs []error
+	}
+	results := make([]chunkResult, len(chunks))
+
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(p.concurrency)
+
+	for i := range chunks {
+		i := i
+		ch := chunks[i]
+		g.Go(func() error {
+			if err := gctx.Err(); err != nil {
+				return err
+			}
+
+			params := url.Values{}
+			params.Set("fltt", "2")
+			params.Set("secids", strings.Join(ch.secIDs, ","))
+			params.Set("fields", quoteFields)
+			params.Set("ut", p.utToken)
+
+			body, err := p.doGet(gctx, quoteURL, params)
+			if err != nil {
+				return fmt.Errorf("eastmoney index quote: %w", err)
+			}
+
+			var resp quoteResponse
+			if err := json.Unmarshal(body, &resp); err != nil {
+				return fmt.Errorf("eastmoney index quote unmarshal: %w", err)
+			}
+			if resp.Rc != 0 {
+				return fmt.Errorf("eastmoney index quote api rc=%d", resp.Rc)
+			}
+
+			var quotes []*gostox.IndexQuote
+			var parseErrs []error
+			for _, d := range resp.Data.Diff {
+				idxCode := gostox.IndexCode{Code: d.Code}
+				quotes = append(quotes, &gostox.IndexQuote{
+					Code:      idxCode,
+					Name:      d.Name,
+					Current:   d.Price,
+					Open:      d.Open,
+					PrevClose: d.PrevClose,
+					Close:     d.Price,
+					High:      d.High,
+					Low:       d.Low,
+					Volume:    d.Volume * 100,
+					Amount:    d.Amount,
+					Change:    d.Change,
+					ChangePct: d.ChangePct,
+					Timestamp: ch.now,
+				})
+			}
+			results[i] = chunkResult{quotes: quotes, parseErrs: parseErrs}
+			return nil
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+
+	var quotes []*gostox.IndexQuote
+	var allParseErrs []error
+	found := make(map[string]bool, len(secIDs))
+	for _, r := range results {
+		for _, q := range r.quotes {
+			found[q.Code.String()] = true
+		}
+		quotes = append(quotes, r.quotes...)
+		allParseErrs = append(allParseErrs, r.parseErrs...)
+	}
+	for _, c := range codes {
+		if !found[c.String()] {
+			allParseErrs = append(allParseErrs, fmt.Errorf("missing index quote for %s", c))
+		}
 	}
 	if len(allParseErrs) > 0 {
 		return quotes, &gostox.PartialError{Failures: allParseErrs}
@@ -397,6 +513,53 @@ func (p *Provider) GetIndexKline(ctx context.Context, code gostox.IndexCode, per
 }
 
 func (p *Provider) doGet(ctx context.Context, rawURL string, params url.Values) ([]byte, error) {
+	if err := p.limiter.Wait(ctx); err != nil {
+		return nil, fmt.Errorf("eastmoney rate limit: %w", err)
+	}
+
+	var lastErr error
+	for attempt := 0; attempt <= p.maxRetries; attempt++ {
+		if attempt > 0 {
+			wait := p.retryBase * (1 << (attempt - 1))
+			select {
+			case <-time.After(wait):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+
+		body, err := p.doGetOnce(ctx, rawURL, params)
+		if err == nil {
+			return body, nil
+		}
+		if !isRetryable(err) {
+			return nil, err
+		}
+		lastErr = err
+	}
+	return nil, lastErr
+}
+
+type httpStatusError struct {
+	StatusCode int
+}
+
+func (e *httpStatusError) Error() string {
+	return fmt.Sprintf("http status %d", e.StatusCode)
+}
+
+func isRetryable(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var httpErr *httpStatusError
+	if errors.As(err, &httpErr) {
+		return httpErr.StatusCode >= 500
+	}
+	return true
+}
+
+func (p *Provider) doGetOnce(ctx context.Context, rawURL string, params url.Values) ([]byte, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse url: %w", err)
@@ -415,7 +578,7 @@ func (p *Provider) doGet(ctx context.Context, rawURL string, params url.Values) 
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("http status %d", resp.StatusCode)
+		return nil, &httpStatusError{StatusCode: resp.StatusCode}
 	}
 	return io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
 }

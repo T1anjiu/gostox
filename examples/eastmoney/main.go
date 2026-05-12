@@ -24,11 +24,11 @@ func main() {
 	)
 	if err != nil {
 		fmt.Printf("[FAIL] %v\n", err)
-	} else {
-		for _, q := range quotes {
-			fmt.Printf("[PASS] %s %s 当前=%.2f 涨跌=%.2f(%.2f%%) 高=%.2f 低=%.2f 量=%d\n",
-				q.Code, q.Name, q.Current, q.Change, q.ChangePct, q.High, q.Low, q.Volume)
-		}
+		os.Exit(1)
+	}
+	for _, q := range quotes {
+		fmt.Printf("[PASS] %s %s 当前=%.2f 涨跌=%.2f(%.2f%%) 高=%.2f 低=%.2f 量=%d\n",
+			q.Code, q.Name, q.Current, q.Change, q.ChangePct, q.High, q.Low, q.Volume)
 	}
 
 	// 2. K线
@@ -39,11 +39,11 @@ func main() {
 	)
 	if err != nil {
 		fmt.Printf("[FAIL] %v\n", err)
-	} else {
-		for _, k := range klines {
-			fmt.Printf("[PASS] %s O=%.2f C=%.2f H=%.2f L=%.2f V=%d\n",
-				k.Timestamp.Format("2006-01-02"), k.Open, k.Close, k.High, k.Low, k.Volume)
-		}
+		os.Exit(1)
+	}
+	for _, k := range klines {
+		fmt.Printf("[PASS] %s O=%.2f C=%.2f H=%.2f L=%.2f V=%d\n",
+			k.Timestamp.Format("2006-01-02"), k.Open, k.Close, k.High, k.Low, k.Volume)
 	}
 
 	// 3. 股票列表
@@ -51,17 +51,13 @@ func main() {
 	list, err := p.GetStockList(ctx)
 	if err != nil {
 		fmt.Printf("[FAIL] %v\n", err)
-	} else {
-		fmt.Printf("[PASS] 共 %d 只股票\n", len(list))
-		for i, s := range list {
-			if i >= 3 {
-				break
-			}
-			fmt.Printf("  %s %s\n", s.Code, s.Name)
-		}
-	}
-
-	if err != nil || quotes == nil || klines == nil {
 		os.Exit(1)
+	}
+	fmt.Printf("[PASS] 共 %d 只股票\n", len(list))
+	for i, s := range list {
+		if i >= 3 {
+			break
+		}
+		fmt.Printf("  %s %s\n", s.Code, s.Name)
 	}
 }

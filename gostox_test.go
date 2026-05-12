@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 )
 
 func TestParseStockCode(t *testing.T) {
@@ -121,7 +122,7 @@ func TestClient_Failover(t *testing.T) {
 		&fakeProvider{name: "p3", q: want},
 	)
 	var failed []string
-	c.SetOnProviderFail(func(name, method string, err error) {
+	c.SetOnProviderFail(func(name, method string, err error, _ time.Duration) {
 		failed = append(failed, name)
 	})
 
@@ -188,7 +189,7 @@ func TestClient_ErrNotSupported_SkippedNotFailed(t *testing.T) {
 		&fakeProvider{name: "eastmoney", k: want},
 	)
 	var failed []string
-	c.SetOnProviderFail(func(name, method string, err error) {
+	c.SetOnProviderFail(func(name, method string, err error, _ time.Duration) {
 		failed = append(failed, name)
 	})
 
@@ -211,7 +212,7 @@ func TestClient_PartialErrorReturnedWithoutFailover(t *testing.T) {
 		&fakeProvider{name: "p2", q: []*Quote{{Name: "fallback"}}},
 	)
 	var failed []string
-	c.SetOnProviderFail(func(name, method string, err error) {
+	c.SetOnProviderFail(func(name, method string, err error, _ time.Duration) {
 		failed = append(failed, name)
 	})
 
@@ -269,7 +270,7 @@ func TestClient_IndexQuoteFailover(t *testing.T) {
 		&fakeProvider{name: "p2", iq: want},
 	)
 	var failed []string
-	c.SetOnProviderFail(func(name, method string, err error) {
+	c.SetOnProviderFail(func(name, method string, err error, _ time.Duration) {
 		failed = append(failed, name)
 	})
 

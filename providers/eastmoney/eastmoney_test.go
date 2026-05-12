@@ -3,13 +3,17 @@ package eastmoney
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	gostox "github.com/T1anjiu/gostox"
+	"github.com/T1anjiu/gostox/internal/testutil"
 )
 
 func TestToKlineType(t *testing.T) {
@@ -114,7 +118,7 @@ func TestDoGet_LimitReader(t *testing.T) {
 
 func TestGetQuote_ReturnsPartialErrorWhenResponseMissesCodes(t *testing.T) {
 	body := `{"rc":0,"data":{"diff":[{"f2":10.05,"f3":0.7,"f4":0.07,"f5":1234,"f6":9876543.21,"f12":"600000","f13":1,"f14":"浦发银行","f15":10.20,"f16":9.95,"f17":10.00,"f18":9.98}]}}`
-	p := NewProvider(WithHTTPClient(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+	p := NewProvider(WithHTTPClient(&http.Client{Transport: testutil.RoundTripFunc(func(req *http.Request) (*http.Response, error) {
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Body:       io.NopCloser(strings.NewReader(body)),
@@ -138,8 +142,78 @@ func TestGetQuote_ReturnsPartialErrorWhenResponseMissesCodes(t *testing.T) {
 	}
 }
 
-type roundTripFunc func(*http.Request) (*http.Response, error)
+func TestGetStockList_Pagination(t *testing.T) {
+	var pageNumAtomic int32
 
-func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
-	return f(req)
+	// 构建 pageSize 条数据让第一页不触发 break
+	pageSize := 100
+	makeDiff := func(start int, count int) string {
+		var items []string
+		for i := 0; i < count; i++ {
+			code := fmt.Sprintf("%06d", 600000+start+i)
+			items = append(items, `{"f12":"`+code+`","f13":1,"f14":"股票`+code+`"}`)
+		}
+		return `{"rc":0,"data":{"total":101,"diff":[` + strings.Join(items, ",") + `]}}`
+	}
+
+	p := NewProvider(WithHTTPClient(&http.Client{Transport: testutil.RoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		n := atomic.AddInt32(&pageNumAtomic, 1)
+		var body string
+		if n == 1 {
+			body = makeDiff(0, pageSize) // 100 条，不触发 break
+		} else {
+			body = makeDiff(pageSize, 1) // 1 条，不足 pageSize，触发 break
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Header:     make(http.Header),
+		}, nil
+	})}))
+
+	list, err := p.GetStockList(context.Background())
+	if err != nil {
+		t.Fatalf("GetStockList: %v", err)
+	}
+	if len(list) != 101 {
+		t.Fatalf("expected 101 stocks (100+1), got %d", len(list))
+	}
+	n := atomic.LoadInt32(&pageNumAtomic)
+	if n != 2 {
+		t.Fatalf("expected 2 pages, got %d", n)
+	}
 }
+
+func TestGetQuote_ConcurrentChunks(t *testing.T) {
+	var mu sync.Mutex
+	var callCount int
+	p := NewProvider(WithHTTPClient(&http.Client{Transport: testutil.RoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		mu.Lock()
+		callCount++
+		mu.Unlock()
+		body := `{"rc":0,"data":{"diff":[{"f2":10.0,"f3":0.5,"f4":0.05,"f5":100,"f6":1000,"f12":"600000","f13":1,"f14":"浦发银行","f15":10.2,"f16":9.9,"f17":10.0,"f18":9.9}]}}`
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Header:     make(http.Header),
+		}, nil
+	})}))
+
+	// 每次只请求 1 只（触发分块的边界条件是 > chunkSize 100，200 只会进入并发分块）
+	// 但 mock 只返回 sh600000，因此剩下的会全部进入 missing
+	codes := []gostox.StockCode{
+		{Market: gostox.MarketSH, Code: "600000"},
+	}
+	quotes, err := p.GetQuote(context.Background(), codes...)
+	if err != nil {
+		t.Fatalf("GetQuote: %v", err)
+	}
+	if len(quotes) != 1 {
+		t.Fatalf("expected 1 quote, got %d", len(quotes))
+	}
+	if callCount != 1 {
+		t.Fatalf("expected 1 chunk call (1 code < 100), got %d", callCount)
+	}
+}
+
+

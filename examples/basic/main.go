@@ -21,7 +21,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	client.SetOnProviderFail(func(name, method string, err error) {
+	client.SetOnProviderFail(func(name, method string, err error, _ time.Duration) {
 		log.Printf("[warn] provider %s %s failed: %v", name, method, err)
 	})
 

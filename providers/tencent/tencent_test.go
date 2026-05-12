@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	gostox "github.com/T1anjiu/gostox"
+	"github.com/T1anjiu/gostox/internal/testutil"
 )
 
 func TestParseTencentQuote(t *testing.T) {
@@ -150,7 +151,7 @@ func TestExtractKlines(t *testing.T) {
 
 func TestGetQuote_ReturnsPartialErrorWhenResponseMissesCodes(t *testing.T) {
 	body := `v_sh600000="0~浦发银行~600000~10.05~9.98~10.00~1234~0~0~0~0~0~0~0~0~0~0~0~0~0~0~0~0~0~0~0~0~0~0~0~20240102150000~0.07~0.70~10.20~9.95~0~0~9876~0~0";`
-	p := NewProvider(WithHTTPClient(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+	p := NewProvider(WithHTTPClient(&http.Client{Transport: testutil.RoundTripFunc(func(req *http.Request) (*http.Response, error) {
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Body:       io.NopCloser(strings.NewReader(body)),
@@ -174,8 +175,4 @@ func TestGetQuote_ReturnsPartialErrorWhenResponseMissesCodes(t *testing.T) {
 	}
 }
 
-type roundTripFunc func(*http.Request) (*http.Response, error)
 
-func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
-	return f(req)
-}

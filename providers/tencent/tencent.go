@@ -15,6 +15,7 @@ import (
 	"time"
 
 	gostox "github.com/T1anjiu/gostox"
+	"golang.org/x/time/rate"
 )
 
 const (
@@ -48,7 +49,10 @@ const (
 
 // Provider 是腾讯财经数据源。
 type Provider struct {
-	client *http.Client
+	client     *http.Client
+	limiter    *rate.Limiter
+	maxRetries int
+	retryBase  time.Duration
 }
 
 // Option 配置 Provider。
@@ -59,10 +63,28 @@ func WithHTTPClient(c *http.Client) Option {
 	return func(p *Provider) { p.client = c }
 }
 
+// WithRateLimit 设置每秒最大请求数（QPS）。默认 3。
+func WithRateLimit(rps float64) Option {
+	return func(p *Provider) {
+		p.limiter = rate.NewLimiter(rate.Limit(rps), 1)
+	}
+}
+
+// WithRetry 设置最大重试次数和初始等待时长。默认重试 2 次，初始 200ms。
+func WithRetry(maxRetries int, baseDelay time.Duration) Option {
+	return func(p *Provider) {
+		p.maxRetries = maxRetries
+		p.retryBase = baseDelay
+	}
+}
+
 // NewProvider 创建腾讯 Provider。
 func NewProvider(opts ...Option) *Provider {
 	p := &Provider{
-		client: &http.Client{Timeout: 10 * time.Second},
+		client:     &http.Client{Timeout: 10 * time.Second},
+		limiter:    rate.NewLimiter(3, 1),
+		maxRetries: 2,
+		retryBase:  200 * time.Millisecond,
 	}
 	for _, opt := range opts {
 		opt(p)
@@ -114,9 +136,9 @@ func (p *Provider) GetQuote(ctx context.Context, codes ...gostox.StockCode) ([]*
 		req.Header.Set("Referer", "https://gu.qq.com")
 		req.Header.Set("User-Agent", userAgent)
 
-		resp, err := p.client.Do(req)
+		resp, err := p.doRequest(ctx, req, "tencent quote")
 		if err != nil {
-			return quotes, fmt.Errorf("tencent quote: %w", err)
+			return quotes, err
 		}
 
 		body, err := func() ([]byte, error) {
@@ -178,9 +200,9 @@ func (p *Provider) GetKline(ctx context.Context, code gostox.StockCode, period g
 	req.Header.Set("Referer", "https://gu.qq.com")
 	req.Header.Set("User-Agent", userAgent)
 
-	resp, err := p.client.Do(req)
+	resp, err := p.doRequest(ctx, req, "tencent kline")
 	if err != nil {
-		return nil, fmt.Errorf("tencent kline: %w", err)
+		return nil, err
 	}
 	defer resp.Body.Close()
 
@@ -484,4 +506,41 @@ func extractKlines(data map[string]json.RawMessage, keys ...string) ([][]string,
 		return result, nil
 	}
 	return nil, fmt.Errorf("none of keys %v found", keys)
+}
+
+// doRequest 限流 + 重试的 HTTP GET 请求。
+func (p *Provider) doRequest(ctx context.Context, req *http.Request, errPrefix string) (*http.Response, error) {
+	if err := p.limiter.Wait(ctx); err != nil {
+		return nil, fmt.Errorf("%s rate limit: %w", errPrefix, err)
+	}
+
+	var lastErr error
+	for attempt := 0; attempt <= p.maxRetries; attempt++ {
+		if attempt > 0 {
+			wait := p.retryBase * (1 << (attempt - 1))
+			select {
+			case <-time.After(wait):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+
+		resp, err := p.client.Do(req)
+		if err == nil {
+			if resp.StatusCode == http.StatusOK {
+				return resp, nil
+			}
+			resp.Body.Close()
+			lastErr = fmt.Errorf("%s http %d", errPrefix, resp.StatusCode)
+			if resp.StatusCode < 500 {
+				return nil, lastErr
+			}
+			continue
+		}
+		lastErr = fmt.Errorf("%s: %w", errPrefix, err)
+		if ctx.Err() != nil {
+			return nil, lastErr
+		}
+	}
+	return nil, lastErr
 }

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	gostox "github.com/T1anjiu/gostox"
+	"github.com/T1anjiu/gostox/internal/testutil"
 	"golang.org/x/text/encoding/simplifiedchinese"
 )
 
@@ -136,7 +137,7 @@ func TestParseSinaKlineItem(t *testing.T) {
 
 func TestGetQuote_ReturnsPartialErrorWhenResponseMissesCodes(t *testing.T) {
 	body := `var hq_str_sh600000="浦发银行,10.00,9.98,10.05,10.20,9.95,0,0,123456,9876543.21,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2024-01-02,15:00:00,00";`
-	p := NewProvider(WithHTTPClient(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+	p := NewProvider(WithHTTPClient(&http.Client{Transport: testutil.RoundTripFunc(func(req *http.Request) (*http.Response, error) {
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Body:       io.NopCloser(strings.NewReader(body)),
@@ -172,8 +173,4 @@ func transformString(t interface {
 	return string(dst[:nDst]), nSrc, err
 }
 
-type roundTripFunc func(*http.Request) (*http.Response, error)
 
-func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
-	return f(req)
-}

@@ -232,9 +232,9 @@ type Provider interface {
 
 // Client 在多个 provider 之间做故障转移。
 type Client struct {
-	providers  []Provider
-	mu         sync.RWMutex
-	onProviderFail func(providerName, method string, err error)
+	providers      []Provider
+	mu             sync.RWMutex
+	onProviderFail func(providerName, method string, err error, latency time.Duration)
 }
 
 // NewClient 按优先级顺序接收 provider 列表。至少需要传入一个 provider，否则返回错误。
@@ -251,8 +251,9 @@ func NewClient(providers ...Provider) (*Client, error) {
 }
 
 // SetOnProviderFail 设置 provider 失败时的回调函数，可用于打日志、埋点等。
+// 回调提供 provider 名称、方法名、错误和本次调用耗时。
 // 允许传入 nil 以清除回调。并发安全。
-func (c *Client) SetOnProviderFail(fn func(providerName, method string, err error)) {
+func (c *Client) SetOnProviderFail(fn func(providerName, method string, err error, latency time.Duration)) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.onProviderFail = fn
@@ -296,9 +297,11 @@ func tryProviders[T any](
 		return zero, errors.New("gostox: no providers configured")
 	}
 
-	var errs []error
+var errs []error
 	for _, p := range providers {
+		start := time.Now()
 		result, err := fn(p)
+		latency := time.Since(start)
 		if err == nil {
 			return result, nil
 		}
@@ -310,7 +313,7 @@ func tryProviders[T any](
 			continue
 		}
 		if onFail != nil {
-			onFail(p.Name(), method, err)
+			onFail(p.Name(), method, err, latency)
 		}
 		errs = append(errs, fmt.Errorf("%s: %w", p.Name(), err))
 	}
