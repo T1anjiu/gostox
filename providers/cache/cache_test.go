@@ -11,12 +11,12 @@ import (
 )
 
 type mockProvider struct {
-	name    string
-	q       func(codes ...gostox.StockCode) ([]*gostox.Quote, error)
-	k       func(code gostox.StockCode, period gostox.KlinePeriod, count int) ([]*gostox.Kline, error)
-	sl      func() ([]*gostox.StockInfo, error)
-	iq      func(codes ...gostox.IndexCode) ([]*gostox.IndexQuote, error)
-	ik      func(code gostox.IndexCode, period gostox.KlinePeriod, count int) ([]*gostox.IndexKline, error)
+	name string
+	q    func(codes ...gostox.StockCode) ([]*gostox.Quote, error)
+	k    func(code gostox.StockCode, period gostox.KlinePeriod, count int) ([]*gostox.Kline, error)
+	sl   func() ([]*gostox.StockInfo, error)
+	iq   func(codes ...gostox.IndexCode) ([]*gostox.IndexQuote, error)
+	ik   func(code gostox.IndexCode, period gostox.KlinePeriod, count int) ([]*gostox.IndexKline, error)
 }
 
 func (m *mockProvider) Name() string { return m.name }
@@ -253,5 +253,85 @@ func TestCache_Error(t *testing.T) {
 	_, err := p.GetKline(context.Background(), code, gostox.KlinePeriodDay, 5)
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("expected %v, got %v", wantErr, err)
+	}
+}
+
+func TestCache_Quote_PartialErrorPropagatedAndDataCached(t *testing.T) {
+	var callCount atomic.Int32
+	inner := &mockProvider{
+		name: "mock",
+		q: func(codes ...gostox.StockCode) ([]*gostox.Quote, error) {
+			callCount.Add(1)
+			// 只返回第一只，其它视为部分失败
+			if len(codes) == 0 {
+				return nil, nil
+			}
+			return []*gostox.Quote{{Name: codes[0].String(), Code: codes[0]}},
+				&gostox.PartialError{Failures: []error{errors.New("missing")}}
+		},
+	}
+
+	p := New(inner, DefaultTTL)
+	c1 := gostox.StockCode{Market: gostox.MarketSH, Code: "600000"}
+	c2 := gostox.StockCode{Market: gostox.MarketSZ, Code: "000001"}
+
+	got, err := p.GetQuote(context.Background(), c1, c2)
+	var pe *gostox.PartialError
+	if !errors.As(err, &pe) {
+		t.Fatalf("want PartialError, got %v", err)
+	}
+	if len(got) != 1 || got[0].Code != c1 {
+		t.Fatalf("unexpected quotes: %+v", got)
+	}
+
+	// 第二次只请求已成功缓存的 c1，应不再调用 inner
+	got2, err2 := p.GetQuote(context.Background(), c1)
+	if err2 != nil {
+		t.Fatalf("unexpected err: %v", err2)
+	}
+	if len(got2) != 1 {
+		t.Fatalf("cache miss: %+v", got2)
+	}
+	if n := callCount.Load(); n != 1 {
+		t.Fatalf("expected 1 inner call (c1 should be cached despite PartialError), got %d", n)
+	}
+}
+
+func TestCache_IndexQuote_PartialErrorPropagatedAndDataCached(t *testing.T) {
+	var callCount atomic.Int32
+	inner := &mockProvider{
+		name: "mock",
+		iq: func(codes ...gostox.IndexCode) ([]*gostox.IndexQuote, error) {
+			callCount.Add(1)
+			if len(codes) == 0 {
+				return nil, nil
+			}
+			return []*gostox.IndexQuote{{Name: codes[0].String(), Code: codes[0]}},
+				&gostox.PartialError{Failures: []error{errors.New("missing")}}
+		},
+	}
+
+	p := New(inner, DefaultTTL)
+	i1 := gostox.IndexCode{Code: "000001"}
+	i2 := gostox.IndexCode{Code: "399001"}
+
+	got, err := p.GetIndexQuote(context.Background(), i1, i2)
+	var pe *gostox.PartialError
+	if !errors.As(err, &pe) {
+		t.Fatalf("want PartialError, got %v", err)
+	}
+	if len(got) != 1 || got[0].Code != i1 {
+		t.Fatalf("unexpected quotes: %+v", got)
+	}
+
+	got2, err2 := p.GetIndexQuote(context.Background(), i1)
+	if err2 != nil {
+		t.Fatalf("unexpected err: %v", err2)
+	}
+	if len(got2) != 1 {
+		t.Fatalf("cache miss: %+v", got2)
+	}
+	if n := callCount.Load(); n != 1 {
+		t.Fatalf("expected 1 inner call, got %d", n)
 	}
 }

@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"sync"
 	"time"
@@ -106,7 +107,10 @@ func (p *Provider) GetQuote(ctx context.Context, codes ...gostox.StockCode) ([]*
 	}
 
 	fresh, err := p.inner.GetQuote(ctx, missing...)
-	if err != nil {
+	// 即使上游返回 PartialError，仍把已成功的数据写入缓存并返回。
+	// 其它类型错误直接抛出，不污染缓存。
+	var partialErr *gostox.PartialError
+	if err != nil && !errors.As(err, &partialErr) {
 		return nil, err
 	}
 
@@ -118,7 +122,7 @@ func (p *Provider) GetQuote(ctx context.Context, codes ...gostox.StockCode) ([]*
 	}
 	p.mu.Unlock()
 
-	return results, nil
+	return results, err
 }
 
 func (p *Provider) GetKline(ctx context.Context, code gostox.StockCode, period gostox.KlinePeriod, count int) ([]*gostox.Kline, error) {
@@ -182,7 +186,9 @@ func (p *Provider) GetIndexQuote(ctx context.Context, codes ...gostox.IndexCode)
 	}
 
 	fresh, err := p.inner.GetIndexQuote(ctx, missing...)
-	if err != nil {
+	// 同 GetQuote：PartialError 不阻止缓存写入，其它错误直接抛出。
+	var partialErr *gostox.PartialError
+	if err != nil && !errors.As(err, &partialErr) {
 		return nil, err
 	}
 
@@ -194,7 +200,7 @@ func (p *Provider) GetIndexQuote(ctx context.Context, codes ...gostox.IndexCode)
 	}
 	p.mu.Unlock()
 
-	return results, nil
+	return results, err
 }
 
 func (p *Provider) GetIndexKline(ctx context.Context, code gostox.IndexCode, period gostox.KlinePeriod, count int) ([]*gostox.IndexKline, error) {
