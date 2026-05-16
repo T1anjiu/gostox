@@ -72,7 +72,7 @@ go get github.com/T1anjiu/gostox
 
 要求：
 
-- Go `1.22+`
+- Go `1.25+`
 
 ## 快速开始
 
@@ -139,15 +139,14 @@ func main() {
 		log.Fatal(err)
 	}
 
-	client.SetOnProviderFail(func(name, method string, err error) {
-		log.Printf("provider %s %s failed: %v", name, method, err)
+	client.SetOnProviderFail(func(name, method string, err error, latency time.Duration) {
+		log.Printf("provider %s %s failed in %s: %v", name, method, latency, err)
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	_, err := client.GetQuote(ctx, gostox.StockCode{Market: gostox.MarketSH, Code: "600000"})
-	if err != nil {
+	if _, err := client.GetQuote(ctx, gostox.StockCode{Market: gostox.MarketSH, Code: "600000"}); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -345,6 +344,69 @@ for _, q := range quotes {
 - 不会继续切换到下一个 provider
 
 这是为了避免在部分成功场景下丢失已经取到的数据。
+
+## 缓存装饰器
+
+`providers/cache` 提供了带 TTL 的 `Provider` 包装器，可以叠加在任意 provider 上，让重复请求命中本地缓存而不打到上游。
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+	"time"
+
+	gostox "github.com/T1anjiu/gostox"
+	"github.com/T1anjiu/gostox/providers/cache"
+	"github.com/T1anjiu/gostox/providers/eastmoney"
+)
+
+func main() {
+	cached := cache.New(eastmoney.NewProvider(), cache.DefaultTTL)
+
+	client, err := gostox.NewClient(cached)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// 第一次走网络，第二次命中缓存
+	_, _ = client.GetQuote(ctx, gostox.StockCode{Market: gostox.MarketSH, Code: "600000"})
+	_, _ = client.GetQuote(ctx, gostox.StockCode{Market: gostox.MarketSH, Code: "600000"})
+}
+```
+
+`cache.DefaultTTL` 默认值：
+
+| 方法 | TTL |
+| --- | --- |
+| `GetQuote` | 3s |
+| `GetKline` | 60s |
+| `GetStockList` | 24h |
+| `GetIndexQuote` | 3s |
+| `GetIndexKline` | 60s |
+
+需要自定义可以直接构造 `cache.TTLConfig`：
+
+```go
+cached := cache.New(eastmoney.NewProvider(), cache.TTLConfig{
+	Quote:      time.Second,
+	Kline:      5 * time.Minute,
+	StockList:  6 * time.Hour,
+	IndexQuote: time.Second,
+	IndexKline: 5 * time.Minute,
+})
+```
+
+注意事项：
+
+- `GetQuote` 和 `GetIndexQuote` 按代码分别缓存，相同代码命中、缺失代码会回源
+- `GetKline` / `GetIndexKline` 的缓存键包含 `code + period + count`，参数变化会重新请求
+- 当前缓存层没有 singleflight 合并，cache miss 时并发请求会同时打到上游
+- 若上游返回 `PartialError`，已成功的数据仍会写入缓存，错误本身不缓存
 
 ## Provider 配置
 
