@@ -335,3 +335,121 @@ func TestCache_IndexQuote_PartialErrorPropagatedAndDataCached(t *testing.T) {
 		t.Fatalf("expected 1 inner call, got %d", n)
 	}
 }
+
+func TestCache_Kline_HardErrorNotCached(t *testing.T) {
+	var callCount atomic.Int32
+	inner := &mockProvider{
+		name: "mock",
+		k: func(code gostox.StockCode, period gostox.KlinePeriod, count int) ([]*gostox.Kline, error) {
+			callCount.Add(1)
+			return nil, errors.New("network error")
+		},
+	}
+
+	p := New(inner, DefaultTTL)
+	code := gostox.StockCode{Market: gostox.MarketSH, Code: "600000"}
+
+	// 第一次：硬错误，不应缓存
+	_, err1 := p.GetKline(context.Background(), code, gostox.KlinePeriodDay, 5)
+	if err1 == nil {
+		t.Fatal("expected error")
+	}
+
+	// 第二次：硬错误不应该被缓存，应再次调用 inner
+	_, err2 := p.GetKline(context.Background(), code, gostox.KlinePeriodDay, 5)
+	if err2 == nil {
+		t.Fatal("expected error")
+	}
+
+	if n := callCount.Load(); n != 2 {
+		t.Fatalf("expected 2 inner calls (error must not be cached), got %d", n)
+	}
+}
+
+func TestCache_Kline_PartialErrorCachedAndPropagated(t *testing.T) {
+	var callCount atomic.Int32
+	inner := &mockProvider{
+		name: "mock",
+		k: func(code gostox.StockCode, period gostox.KlinePeriod, count int) ([]*gostox.Kline, error) {
+			callCount.Add(1)
+			return []*gostox.Kline{{Open: 10.0, Code: code, Period: period}},
+				&gostox.PartialError{Failures: []error{errors.New("partial")}}
+		},
+	}
+
+	p := New(inner, DefaultTTL)
+	code := gostox.StockCode{Market: gostox.MarketSH, Code: "600000"}
+
+	got1, err1 := p.GetKline(context.Background(), code, gostox.KlinePeriodDay, 5)
+	var pe *gostox.PartialError
+	if !errors.As(err1, &pe) {
+		t.Fatalf("want PartialError, got %v", err1)
+	}
+	if len(got1) != 1 || got1[0].Open != 10.0 {
+		t.Fatalf("unexpected klines: %+v", got1)
+	}
+
+	// 第二次：PartialError + 数据应被一起缓存
+	got2, err2 := p.GetKline(context.Background(), code, gostox.KlinePeriodDay, 5)
+	var pe2 *gostox.PartialError
+	if !errors.As(err2, &pe2) {
+		t.Fatalf("want PartialError on second call too, got %v", err2)
+	}
+	if len(got2) != 1 || got2[0].Open != 10.0 {
+		t.Fatalf("cache miss: %+v", got2)
+	}
+	if n := callCount.Load(); n != 1 {
+		t.Fatalf("expected 1 inner call, got %d", n)
+	}
+}
+
+func TestCache_StockList_HardErrorNotCached(t *testing.T) {
+	var callCount atomic.Int32
+	inner := &mockProvider{
+		name: "mock",
+		sl: func() ([]*gostox.StockInfo, error) {
+			callCount.Add(1)
+			return nil, errors.New("network error")
+		},
+	}
+
+	p := New(inner, DefaultTTL)
+
+	_, err1 := p.GetStockList(context.Background())
+	if err1 == nil {
+		t.Fatal("expected error")
+	}
+	_, err2 := p.GetStockList(context.Background())
+	if err2 == nil {
+		t.Fatal("expected error")
+	}
+	if n := callCount.Load(); n != 2 {
+		t.Fatalf("expected 2 inner calls (error must not be cached), got %d", n)
+	}
+}
+
+func TestCache_IndexKline_HardErrorNotCached(t *testing.T) {
+	var callCount atomic.Int32
+	inner := &mockProvider{
+		name: "mock",
+		ik: func(code gostox.IndexCode, period gostox.KlinePeriod, count int) ([]*gostox.IndexKline, error) {
+			callCount.Add(1)
+			return nil, errors.New("network error")
+		},
+	}
+
+	p := New(inner, DefaultTTL)
+	ic := gostox.IndexCode{Code: "000001"}
+
+	_, err1 := p.GetIndexKline(context.Background(), ic, gostox.KlinePeriodDay, 5)
+	if err1 == nil {
+		t.Fatal("expected error")
+	}
+	_, err2 := p.GetIndexKline(context.Background(), ic, gostox.KlinePeriodDay, 5)
+	if err2 == nil {
+		t.Fatal("expected error")
+	}
+	if n := callCount.Load(); n != 2 {
+		t.Fatalf("expected 2 inner calls (error must not be cached), got %d", n)
+	}
+}

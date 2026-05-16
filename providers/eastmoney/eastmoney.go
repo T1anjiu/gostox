@@ -35,11 +35,11 @@ const (
 //   f8  换手率(%)        f9  市盈率(动态)   f10 量比
 //   f12 股票代码         f13 市场(1=沪,0=深) f14 股票名称
 //   f15 最高价           f16 最低价         f17 开盘价
-//   f18 昨收
+//   f18 昨收             f30 行情时间戳(毫秒)
 //
 // 当请求参数使用 fltt=2 时，返回值已为真实价格（浮点），无需再除以 100。
 // 若使用 fltt=1，则返回整数需除以 100。旧版本误用 flts 导致价格被额外缩放。
-const quoteFields = "f2,f3,f4,f5,f6,f7,f8,f9,f10,f12,f13,f14,f15,f16,f17,f18"
+const quoteFields = "f2,f3,f4,f5,f6,f7,f8,f9,f10,f12,f13,f14,f15,f16,f17,f18,f30"
 
 // K 线字段：f51=日期 f52=开 f53=收 f54=高 f55=低 f56=成交量 f57=成交额
 const klineFields2 = "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61"
@@ -130,10 +130,9 @@ func (p *Provider) GetQuote(ctx context.Context, codes ...gostox.StockCode) ([]*
 
 	// 分批
 	type chunk struct {
-		secIDs  []string
-		codes   map[string]gostox.StockCode
-		now     time.Time
-		index   int
+		secIDs []string
+		now    time.Time
+		index  int
 	}
 	var chunks []chunk
 	for i := 0; i < len(secIDs); i += quoteChunkSize {
@@ -143,7 +142,6 @@ func (p *Provider) GetQuote(ctx context.Context, codes ...gostox.StockCode) ([]*
 		}
 		chunks = append(chunks, chunk{
 			secIDs: secIDs[i:end],
-			codes:  requested,
 			now:    time.Now(),
 			index:  len(chunks),
 		})
@@ -211,7 +209,7 @@ func (p *Provider) GetQuote(ctx context.Context, codes ...gostox.StockCode) ([]*
 					Amount:    d.Amount,
 					Change:    d.Change,
 					ChangePct: d.ChangePct,
-					Timestamp: ch.now,
+					Timestamp: eastmoneyTime(d.Time, ch.now),
 				})
 			}
 			results[i] = chunkResult{quotes: quotes, parseErrs: parseErrs}
@@ -290,8 +288,8 @@ func (p *Provider) GetKline(ctx context.Context, code gostox.StockCode, period g
 	return klines, nil
 }
 
-// GetStockList 拉取沪深 A 股列表（分页）。
-// fs 过滤：m:0+t:6 深主板, m:0+t:80 创业板, m:1+t:2 沪主板, m:1+t:23 科创板。
+// GetStockList 拉取沪深京 A 股列表（分页）。
+// fs 过滤：m:0+t:6 深主板, m:0+t:80 创业板, m:1+t:2 沪主板, m:1+t:23 科创板, m:0+t:128 北交所。
 // 最多拉取 maxStockListPages 页，防止接口异常时无限循环。
 func (p *Provider) GetStockList(ctx context.Context) ([]*gostox.StockInfo, error) {
 	var all []*gostox.StockInfo
@@ -312,7 +310,7 @@ func (p *Provider) GetStockList(ctx context.Context) ([]*gostox.StockInfo, error
 		params.Set("fltt", "2")
 		params.Set("invt", "2")
 		params.Set("fid", "f3")
-		params.Set("fs", "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23")
+		params.Set("fs", "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:128")
 		params.Set("fields", "f12,f13,f14")
 		params.Set("ut", p.utToken)
 
@@ -433,7 +431,7 @@ func (p *Provider) GetIndexQuote(ctx context.Context, codes ...gostox.IndexCode)
 					Amount:    d.Amount,
 					Change:    d.Change,
 					ChangePct: d.ChangePct,
-					Timestamp: ch.now,
+					Timestamp: eastmoneyTime(d.Time, ch.now),
 				})
 			}
 			results[i] = chunkResult{quotes: quotes, parseErrs: parseErrs}
@@ -741,6 +739,16 @@ func parseKlineTimestamp(raw string) (time.Time, error) {
 	return ts, nil
 }
 
+// eastmoneyTime 解析东方财富行情毫秒时间戳，失败时回退到 fallback。
+func eastmoneyTime(ms int64, fallback time.Time) time.Time {
+	if ms > 0 {
+		if t := time.UnixMilli(ms); t.Year() > 2000 && t.Year() < 2100 {
+			return t
+		}
+	}
+	return fallback
+}
+
 func parseEastmoneyFloat(raw, field string) (float64, error) {
 	v, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
 	if err != nil {
@@ -778,6 +786,7 @@ type quoteResponse struct {
 			Low       float64 `json:"f16"`
 			Open      float64 `json:"f17"`
 			PrevClose float64 `json:"f18"`
+			Time      int64   `json:"f30"`
 		} `json:"diff"`
 	} `json:"data"`
 }

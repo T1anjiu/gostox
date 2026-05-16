@@ -326,6 +326,8 @@ func parseSinaQuote(raw string, code gostox.StockCode) (*gostox.Quote, error) {
 	}, nil
 }
 
+// parseSinaKlineItem 解析一条新浪 K 线。
+// 注意：新浪 K 线接口不返回成交额（Amount）字段，Kline.Amount 恒为 0。
 func parseSinaKlineItem(item sinaKlineItem, code gostox.StockCode, period gostox.KlinePeriod) (*gostox.Kline, error) {
 	ts, err := parseSinaKlineTime(item.Day)
 	if err != nil {

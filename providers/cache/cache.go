@@ -136,6 +136,10 @@ func (p *Provider) GetKline(ctx context.Context, code gostox.StockCode, period g
 	}
 
 	klines, err := p.inner.GetKline(ctx, code, period, count)
+	var partialErr *gostox.PartialError
+	if err != nil && !errors.As(err, &partialErr) {
+		return klines, err
+	}
 
 	p.mu.Lock()
 	p.klines[key] = &entry[[]*gostox.Kline]{value: klines, err: err, expires: time.Now().Add(p.ttl.Kline)}
@@ -153,6 +157,10 @@ func (p *Provider) GetStockList(ctx context.Context) ([]*gostox.StockInfo, error
 	}
 
 	list, err := p.inner.GetStockList(ctx)
+	var partialErr *gostox.PartialError
+	if err != nil && !errors.As(err, &partialErr) {
+		return list, err
+	}
 
 	p.mu.Lock()
 	p.sl = &entry[[]*gostox.StockInfo]{value: list, err: err, expires: time.Now().Add(p.ttl.StockList)}
@@ -214,6 +222,10 @@ func (p *Provider) GetIndexKline(ctx context.Context, code gostox.IndexCode, per
 	}
 
 	klines, err := p.inner.GetIndexKline(ctx, code, period, count)
+	var partialErr *gostox.PartialError
+	if err != nil && !errors.As(err, &partialErr) {
+		return klines, err
+	}
 
 	p.mu.Lock()
 	p.ik[key] = &entry[[]*gostox.IndexKline]{value: klines, err: err, expires: time.Now().Add(p.ttl.IndexKline)}

@@ -11,6 +11,7 @@ import (
 	gostox "github.com/T1anjiu/gostox"
 	"github.com/T1anjiu/gostox/internal/testutil"
 	"golang.org/x/text/encoding/simplifiedchinese"
+	"golang.org/x/text/transform"
 )
 
 func TestParseSinaQuote(t *testing.T) {
@@ -99,8 +100,7 @@ func TestToSinaScale(t *testing.T) {
 
 func TestDecodeGBK(t *testing.T) {
 	src := "浦发银行 涨 0.5%"
-	enc := simplifiedchinese.GBK.NewEncoder()
-	gbk, _, err := transformString(enc, src)
+	gbk, _, err := transform.String(simplifiedchinese.GBK.NewEncoder(), src)
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
@@ -122,6 +122,9 @@ func TestParseSinaKlineItem(t *testing.T) {
 	}
 	if k.Volume != 12345 || k.Close != 10.1 {
 		t.Fatalf("unexpected kline: %+v", k)
+	}
+	if k.Amount != 0 {
+		t.Errorf("sina API does not return Amount, expected 0, got %f", k.Amount)
 	}
 
 	item.Volume = "bad"
@@ -161,16 +164,5 @@ func TestGetQuote_ReturnsPartialErrorWhenResponseMissesCodes(t *testing.T) {
 	}
 }
 
-// transformString 是测试辅助，等价于 transform.String。
-func transformString(t interface {
-	Transform(dst, src []byte, atEOF bool) (nDst, nSrc int, err error)
-	Reset()
-}, s string) (string, int, error) {
-	// 简化实现：分配足够大的 buffer。
-	src := []byte(s)
-	dst := make([]byte, len(src)*4+16)
-	nDst, nSrc, err := t.Transform(dst, src, true)
-	return string(dst[:nDst]), nSrc, err
-}
 
 
