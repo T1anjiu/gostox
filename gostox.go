@@ -297,7 +297,7 @@ func tryProviders[T any](
 		return zero, errors.New("gostox: no providers configured")
 	}
 
-var errs []error
+	var errs []error
 	for _, p := range providers {
 		start := time.Now()
 		result, err := fn(p)
