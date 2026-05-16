@@ -2,11 +2,12 @@
 
 `gostox` 是一个面向 A 股市场的 Go 行情库，提供统一的实时行情、K 线和股票列表接口，并支持在多个数据源之间按顺序故障切换。
 
-当前内置了 3 个网页数据源实现：
+当前内置了 4 个数据源实现：
 
 - `eastmoney`
 - `sina`
 - `tencent`
+- `tushare`（需注册获取 token）
 
 这个库的目标是让 Go 项目能用一致的数据模型接入常见 A 股行情源，而不是分别处理每个 provider 的返回格式。
 
@@ -26,7 +27,7 @@
 
 - 市场：沪深 A 股，指数（上证、深证、创业板等）
 - 数据类型：实时快照、K 线、指数行情、指数 K 线、股票列表
-- provider：东方财富、新浪、腾讯
+- provider：东方财富、新浪、腾讯、Tushare Pro
 
 ### Provider 能力对比
 
@@ -35,6 +36,7 @@
 | `eastmoney` | Yes | Yes | Yes | Yes | Yes |
 | `sina` | Yes | Yes | No | No | No |
 | `tencent` | Yes | Yes | No | No | No |
+| `tushare` | Yes | Yes | Yes | Yes | Yes |
 
 ### K 线周期支持
 
@@ -52,7 +54,7 @@
 说明：
 
 - `sina` 当前不支持 `KlinePeriod1Min`
-- `eastmoney` 和 `tencent` 支持上述全部周期
+- `eastmoney`、`tencent` 和 `tushare` 支持上述全部周期
 
 ## 不支持的范围
 
